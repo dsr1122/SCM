@@ -9,6 +9,7 @@ export async function runGitProcess(
   cmd: 'git-upload-pack' | 'git-receive-pack',
   repoPath: string,
   stateless: boolean,
+  envVars: Record<string, string> = {},
 ): Promise<void> {
   const args = stateless ? ['--stateless-rpc', repoPath] : [repoPath];
   const contentType = `application/x-${cmd}-result`;
@@ -21,6 +22,7 @@ export async function runGitProcess(
   await new Promise<void>((resolve, reject) => {
     const proc = spawn(cmd, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, ...envVars },
     });
 
     proc.stderr.on('data', (chunk: Buffer) => {

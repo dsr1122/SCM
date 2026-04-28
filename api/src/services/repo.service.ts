@@ -1,10 +1,12 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { rm } from 'fs/promises';
+import { rm, mkdir, copyFile, chmod } from 'fs/promises';
 import path from 'path';
 import { config } from '../config.js';
+import { fileURLToPath } from 'url';
 
 const execFileAsync = promisify(execFile);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // UUID-based disk path prevents path traversal — user input never touches the filesystem path.
 export function repoDiskPath(repoId: string): string {
@@ -13,14 +15,24 @@ export function repoDiskPath(repoId: string): string {
   return path.join(config.gitReposRoot, shard, `${repoId}.git`);
 }
 
-export async function initBareRepo(diskPath: string): Promise<void> {
+export async function initBareRepo(repoId: string, diskPath: string): Promise<void> {
   const dir = path.dirname(diskPath);
-  const { mkdir } = await import('fs/promises');
   await mkdir(dir, { recursive: true });
   await execFileAsync('git', ['init', '--bare', diskPath]);
+
   // Set safe defaults
   await execFileAsync('git', ['-C', diskPath, 'config', 'receive.denyNonFastForwards', 'false']);
   await execFileAsync('git', ['-C', diskPath, 'config', 'receive.denyDeleteCurrent', 'true']);
+
+  // Install pre-receive hook
+  const hookSource = path.join(__dirname, '../hooks/pre-receive.js');
+  const hookDest = path.join(diskPath, 'hooks', 'pre-receive');
+  try {
+    await copyFile(hookSource, hookDest);
+    await chmod(hookDest, 0o755);
+  } catch (err) {
+    console.error(`[repo] failed to install pre-receive hook for ${repoId}:`, err);
+  }
 }
 
 export async function deleteBareRepo(diskPath: string): Promise<void> {

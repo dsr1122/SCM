@@ -45,11 +45,13 @@ export default async function repoRoutes(app: FastifyInstance) {
       .limit(1);
     if (existing.length) return reply.status(409).send({ error: 'Repository slug already exists in this org' });
 
-    const diskPath = repoDiskPath(crypto.randomUUID());
-    await initBareRepo(diskPath);
+    const repoId = crypto.randomUUID();
+    const diskPath = repoDiskPath(repoId);
+    await initBareRepo(repoId, diskPath);
 
     const [repo] = await db.insert(repositories).values({
       ...parsed.data,
+      id: repoId,
       orgId,
       ownerId: req.user!.id,
       diskPath,

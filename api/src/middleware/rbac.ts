@@ -1,6 +1,6 @@
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { db } from '../db/client.js';
-import { repositories, orgMembers, repoCollaborators, teamMembers, teamRepoPermissions } from '../db/schema.js';
+import { repositories, orgMembers, repoCollaborators, teamMembers, teamRepoPermissions, users } from '../db/schema.js';
 import { and, eq } from 'drizzle-orm';
 import type { OrgRole, RepoRole } from '../types/index.js';
 
@@ -28,6 +28,10 @@ export async function resolveRepoAccess(
     .limit(1);
 
   if (!repo) return { role: null, repo: null };
+
+  // 0. Superadmin bypass
+  const [user] = await db.select({ isSuperadmin: users.isSuperadmin }).from(users).where(eq(users.id, userId)).limit(1);
+  if (user?.isSuperadmin) return { role: 'admin', repo };
 
   // 1. Explicit collaborator
   const [collab] = await db

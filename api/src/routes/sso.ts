@@ -12,6 +12,7 @@ import { logAuditEvent } from '../services/audit.service.js';
 import { config } from '../config.js';
 import { redis } from '../middleware/rateLimiter.js';
 import type { OrgRole } from '../types/index.js';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 
 const createProviderBody = z.object({
   name:          z.string().min(1).max(100),
@@ -95,11 +96,16 @@ export default async function ssoRoutes(app: FastifyInstance) {
 
     // Exchange code for tokens
     let tokenEndpoint = provider.tokenUrl ?? '';
+    let jwksUri: string | null = null;
+    let issuer: string | null = null;
+
     if (provider.providerType === 'oidc' && provider.discoveryUrl) {
       try {
         const disc = await fetch(`${provider.discoveryUrl}/.well-known/openid-configuration`);
         const meta = await disc.json() as Record<string, string>;
         tokenEndpoint = meta['token_endpoint'] ?? '';
+        jwksUri = meta['jwks_uri'] ?? null;
+        issuer = meta['issuer'] ?? null;
       } catch {
         return reply.status(502).send({ error: 'Failed to contact OIDC discovery endpoint' });
       }
@@ -126,8 +132,23 @@ export default async function ssoRoutes(app: FastifyInstance) {
     let rawClaims: Record<string, unknown> = {};
 
     if (tokens['id_token']) {
-      const parts = tokens['id_token'].split('.');
-      rawClaims = JSON.parse(Buffer.from(parts[1] ?? '', 'base64url').toString()) as Record<string, unknown>;
+      if (provider.providerType === 'oidc' && jwksUri) {
+        try {
+          const JWKS = createRemoteJWKSet(new URL(jwksUri));
+          const { payload } = await jwtVerify(tokens['id_token'], JWKS, {
+            issuer: issuer ?? undefined,
+            audience: provider.clientId,
+          });
+          rawClaims = payload as Record<string, unknown>;
+        } catch (err) {
+          req.log.error(err, 'ID token verification failed');
+          return reply.status(401).send({ error: 'Invalid ID token signature' });
+        }
+      } else {
+        // Fallback for non-OIDC or missing discovery (less secure, but better than nothing)
+        const parts = tokens['id_token'].split('.');
+        rawClaims = JSON.parse(Buffer.from(parts[1] ?? '', 'base64url').toString()) as Record<string, unknown>;
+      }
       externalId = String(rawClaims['sub'] ?? '');
       email = String(rawClaims['email'] ?? '');
     } else {

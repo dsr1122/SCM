@@ -82,7 +82,14 @@ export default async function authRoutes(app: FastifyInstance) {
     const valid = user ? await verifyPassword(hashToCheck, password) : false;
 
     if (!user || !valid || !user.isActive) {
-      logAuditEvent({ actorId: user?.id, actorUsername: user?.username, action: 'user.login_failed', metadata: { login }, ipAddress: req.ip, userAgent: req.headers['user-agent'] });
+      logAuditEvent({
+        actorId: user?.id,
+        actorUsername: user?.username ?? 'anonymous',
+        action: 'user.login_failed',
+        metadata: { login: user ? 'valid_user' : 'invalid_user' },
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent']
+      });
       return reply.status(401).send({ error: 'Invalid credentials' });
     }
 

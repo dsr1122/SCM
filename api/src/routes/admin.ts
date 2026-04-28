@@ -8,6 +8,7 @@ import { users, organizations, repositories, pullRequests, auditLog } from '../d
 import { requireAuth } from '../middleware/auth.js';
 import { requireSuperadmin } from '../middleware/superadmin.js';
 import { config } from '../config.js';
+import { checkPushAllowed } from '../services/branchProtection.service.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -16,12 +17,54 @@ const updateUserBody = z.object({
   isSuperadmin: z.boolean().optional(),
 }).strict();
 
+const checkPushBody = z.object({
+  repoId: z.string().uuid(),
+  userId: z.string().uuid(),
+  updates: z.array(z.object({
+    oldSha: z.string(),
+    newSha: z.string(),
+    ref:    z.string(),
+  })),
+}).strict();
+
+let cachedStorageBytes = 0;
+let lastStorageCheck = 0;
+const STORAGE_CACHE_TTL = 300_000; // 5 minutes
+
 export default async function adminRoutes(app: FastifyInstance) {
   const pre = [requireAuth, requireSuperadmin];
 
+  // ── Internal: Check Push ──────────────────────────────────────────────────
+  // This endpoint is called by the pre-receive hook.
+  app.post('/internal/check-push', async (req, reply) => {
+    // Only allow localhost
+    if (req.ip !== '127.0.0.1' && req.ip !== '::1') {
+      return reply.status(403).send({ error: 'Forbidden' });
+    }
+
+    const parsed = checkPushBody.safeParse(req.body);
+    if (!parsed.success) return reply.status(400).send({ error: 'Invalid body' });
+
+    const { repoId, userId, updates } = parsed.data;
+
+    for (const update of updates) {
+      if (!update.ref.startsWith('refs/heads/')) continue;
+      const branch = update.ref.replace('refs/heads/', '');
+      const isForcePush = update.oldSha !== '0'.repeat(40) && update.newSha !== '0'.repeat(40); // Simplistic check
+
+      const result = await checkPushAllowed(repoId, branch, userId, isForcePush);
+      if (!result.allowed) {
+        return reply.status(403).send({ error: result.reason });
+      }
+    }
+
+    return reply.status(200).send({ ok: true });
+  });
+
   // ── Users ─────────────────────────────────────────────────────────────────
   app.get('/users', { preHandler: pre }, async (req, reply) => {
-    const query = req.query as Record<string, string>;
+...
+
     const search = query['q'];
     const limit  = Math.min(parseInt(query['limit']  ?? '50', 10), 200);
     const offset = parseInt(query['offset'] ?? '0', 10);
@@ -100,12 +143,15 @@ export default async function adminRoutes(app: FastifyInstance) {
       db.select({ c: count() }).from(pullRequests),
     ]);
 
-    let storageBytes = 0;
-    try {
-      const { stdout } = await execFileAsync('du', ['-sb', config.gitReposRoot]);
-      storageBytes = parseInt(stdout.split('\t')[0] ?? '0', 10);
-    } catch {
-      // git repos dir may be empty
+    const now = Date.now();
+    if (now - lastStorageCheck > STORAGE_CACHE_TTL) {
+      try {
+        const { stdout } = await execFileAsync('du', ['-sb', config.gitReposRoot]);
+        cachedStorageBytes = parseInt(stdout.split('\t')[0] ?? '0', 10);
+        lastStorageCheck = now;
+      } catch {
+        // git repos dir may be empty
+      }
     }
 
     return reply.send({
@@ -113,7 +159,7 @@ export default async function adminRoutes(app: FastifyInstance) {
       organizations: orgCount?.c ?? 0,
       repositories: repoCount?.c ?? 0,
       pullRequests: prCount?.c ?? 0,
-      storageBytes,
+      storageBytes: cachedStorageBytes,
     });
   });
 

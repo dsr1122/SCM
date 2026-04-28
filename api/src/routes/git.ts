@@ -8,6 +8,7 @@ import { infoRefs, runGitProcess } from '../services/git.service.js';
 import { dispatchWebhookEvent } from '../services/webhook.service.js';
 import { checkPushAllowed } from '../services/branchProtection.service.js';
 import { logAuditEvent } from '../services/audit.service.js';
+import { config } from '../config.js';
 
 async function resolveRepo(orgSlug: string, repoSlug: string) {
   const [org] = await db.select({ id: organizations.id })
@@ -51,7 +52,7 @@ export default async function gitRoutes(app: FastifyInstance) {
     await infoRefs(req, reply, service, repo.diskPath);
   });
 
-  app.post('/git-upload-pack', { preHandler: [optionalAuth] }, async (req, reply) => {
+  app.post('/git-upload-pack', { preHandler: [optionalAuth], bodyLimit: 536_870_912 }, async (req, reply) => {
     const { orgSlug, repoSlug } = req.params as { orgSlug: string; repoSlug: string };
     const repo = await resolveRepo(orgSlug, repoSlug);
     if (!repo) return reply.status(404).send('Repository not found');
@@ -68,7 +69,7 @@ export default async function gitRoutes(app: FastifyInstance) {
     await runGitProcess(req, reply, 'git-upload-pack', repo.diskPath, true);
   });
 
-  app.post('/git-receive-pack', { preHandler: [optionalAuth] }, async (req, reply) => {
+  app.post('/git-receive-pack', { preHandler: [optionalAuth], bodyLimit: 536_870_912 }, async (req, reply) => {
     const { orgSlug, repoSlug } = req.params as { orgSlug: string; repoSlug: string };
     const repo = await resolveRepo(orgSlug, repoSlug);
     if (!repo) return reply.status(404).send('Repository not found');
@@ -81,14 +82,13 @@ export default async function gitRoutes(app: FastifyInstance) {
     const { role } = await resolveRepoAccess(req.user.id, repo.id);
     if (!role || role === 'read') return reply.status(403).send('Forbidden');
 
-    // Branch protection check on the default branch (conservative — full ref parsing
-    // would require buffering the pack, which we avoid for streaming. Check default branch.)
-    const check = await checkPushAllowed(repo.id, repo.defaultBranch, req.user.id, false);
-    if (!check.allowed) {
-      return reply.status(403).send(check.reason ?? 'Push rejected by branch protection rule');
-    }
+    const envVars = {
+      SCM_REPO_ID: repo.id,
+      SCM_USER_ID: req.user.id,
+      SCM_INTERNAL_API_URL: `http://127.0.0.1:${config.port}`,
+    };
 
-    await runGitProcess(req, reply, 'git-receive-pack', repo.diskPath, true);
+    await runGitProcess(req, reply, 'git-receive-pack', repo.diskPath, true, envVars);
 
     logAuditEvent({ actorId: req.user.id, actorUsername: req.user.username, action: 'repo.pushed', resourceType: 'repository', resourceId: repo.id, repoId: repo.id, ipAddress: req.ip });
 

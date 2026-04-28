@@ -4,6 +4,8 @@ import { webhooks, webhookDeliveries } from '../db/schema.js';
 import { eq, and } from 'drizzle-orm';
 import { config } from '../config.js';
 import type { WebhookEvent } from '../types/index.js';
+import { lookup } from 'dns/promises';
+import ipaddr from 'ipaddr.js';
 
 export function hashSecret(secret: string): string {
   return createHash('sha256').update(secret).digest('hex');
@@ -13,6 +15,27 @@ export function signPayload(secret: string, body: string): string {
   return 'sha256=' + createHmac('sha256', secret).update(body).digest('hex');
 }
 
+async function isSafeUrl(urlStr: string): Promise<boolean> {
+  try {
+    const url = new URL(urlStr);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+
+    const hostname = url.hostname;
+    // Resolve hostname to IP
+    const { address } = await lookup(hostname);
+    const addr = ipaddr.parse(address);
+    const range = addr.range();
+
+    // Block private, loopback, link-local, etc.
+    const unsafeRanges = ['private', 'loopback', 'linkLocal', 'multicast', 'unspecified'];
+    if (unsafeRanges.includes(range)) return false;
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function deliverOnce(
   webhookId: string,
   url: string,
@@ -20,9 +43,14 @@ async function deliverOnce(
   event: WebhookEvent,
   payload: Record<string, unknown>,
 ): Promise<{ status: number | null; durationMs: number; error?: string }> {
+  const start = Date.now();
+
+  if (!(await isSafeUrl(url))) {
+    return { status: null, durationMs: Date.now() - start, error: 'Unsafe webhook URL blocked' };
+  }
+
   const body = JSON.stringify(payload);
   const signature = signPayload(secret, body);
-  const start = Date.now();
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.webhookTimeoutMs);
@@ -65,6 +93,7 @@ export async function dispatchWebhookEvent(
 
     while (attempt <= config.webhookMaxRetries) {
       result = await deliverOnce(hook.id, hook.url, hook.secretHash, event, payload);
+      if (result.error === 'Unsafe webhook URL blocked') break;
       if (result.status && result.status < 500) break;
       attempt++;
       if (attempt <= config.webhookMaxRetries) {

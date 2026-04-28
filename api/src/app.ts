@@ -28,7 +28,7 @@ const app = Fastify({
   requestIdHeader: 'x-request-id',
   requestIdLogLabel: 'requestId',
   trustProxy: true,
-  bodyLimit: 536_870_912,
+  bodyLimit: 1_048_576, // 1MB global limit
 });
 
 await app.register(helmet, {
