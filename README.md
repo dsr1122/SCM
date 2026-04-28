@@ -1,131 +1,451 @@
 # SCM — Enterprise Source Code Management
 
-A self-hosted GitHub/GitLab-style SCM platform built with TypeScript, Fastify, PostgreSQL, Redis, and Nginx.
+A self-hosted, GitHub/GitLab-style source code management platform. Built for security, scalability, and operational simplicity.
 
-## Stack
+---
 
-| Layer | Technology |
+## Table of Contents
+
+- [Features](#features)
+- [Architecture](#architecture)
+- [Prerequisites](#prerequisites)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Project Structure](#project-structure)
+- [API Reference](#api-reference)
+- [Security](#security)
+- [RBAC Model](#rbac-model)
+- [Webhooks](#webhooks)
+- [Development](#development)
+- [Production Deployment](#production-deployment)
+
+---
+
+## Features
+
+- **Git smart-HTTP** — clone, fetch, and push via standard `git` CLI over HTTP
+- **Organizations** — multi-tenant org model with member roles
+- **Repositories** — private/public repos with per-collaborator role overrides
+- **Pull Requests** — open, review, comment, and merge (fast-forward or merge-commit)
+- **Code Review** — inline comments tied to commit SHA, path, and line number
+- **Webhooks** — HMAC-signed event delivery with exponential-backoff retry and delivery log
+- **Auth** — JWT RS256 access tokens + rotating refresh tokens; Argon2id password hashing
+- **RBAC** — five-tier permission model from superadmin down to repo-level collaborator
+- **Rate limiting** — Redis sliding-window per IP and per user
+- **Security headers** — Helmet.js (CSP, HSTS, X-Frame-Options, Referrer-Policy)
+
+---
+
+## Architecture
+
+```
+Browser / Git CLI
+       │
+  ┌────▼──────────────────────────────────┐
+  │              Nginx 1.25               │
+  │  TLS termination · rate-limit headers │
+  │  streaming proxy for git pack data    │
+  └────┬──────────────────────────────────┘
+       │
+  ┌────▼──────────────────┐     ┌────────────────┐
+  │   Fastify API (3000)  │────▶│  PostgreSQL 16  │
+  │   TypeScript · Node   │     │  primary data   │
+  └────┬──────────────────┘     └────────────────┘
+       │
+       │                        ┌────────────────┐
+       ├──────────────────────▶ │    Redis 7      │
+       │                        │  rate limits    │
+       │                        │  JWT blocklist  │
+       │                        └────────────────┘
+       │
+  ┌────▼──────────────────┐
+  │   Git bare repos      │
+  │   /data/repos/<uuid>  │
+  │   (Docker volume)     │
+  └───────────────────────┘
+```
+
+All internal services (API, Postgres, Redis) sit on an isolated `backend` Docker network not reachable from the host. Only Nginx is exposed on port 80.
+
+---
+
+## Prerequisites
+
+| Requirement | Version |
 |---|---|
-| API | Node.js 20 + Fastify 4 + TypeScript |
-| ORM | Drizzle ORM |
-| Database | PostgreSQL 16 |
-| Cache / Rate-limit | Redis 7 |
-| Reverse proxy | Nginx 1.25 |
-| Auth | JWT RS256 (jose) + Argon2id passwords |
-| Deployment | Docker Compose |
+| Docker | 24+ |
+| Docker Compose | v2 (included with Docker Desktop) |
+| `openssl` | any modern version (for key generation) |
+| `git` | 2.x (client-side, for testing clones/pushes) |
+
+---
 
 ## Quick Start
 
 ```bash
-# 1. Generate RS256 key pair and write to .env
+# 1. Clone and enter the project
+git clone <this-repo> scm && cd scm
+
+# 2. Copy the example env file
 cp .env.example .env
+
+# 3. Generate an RS256 key pair (writes JWT_PRIVATE_KEY_B64 / JWT_PUBLIC_KEY_B64 into .env)
 bash scripts/gen-keys.sh
 
-# 2. Start all services
+# 4. Build and start all services
 docker compose up --build
 
-# 3. Register a user
-curl -X POST http://localhost/auth/register \
+# 5. Register your first user
+curl -s -X POST http://localhost/auth/register \
   -H 'Content-Type: application/json' \
-  -d '{"username":"alice","email":"alice@example.com","password":"supersecret123"}'
+  -d '{"username":"alice","email":"alice@example.com","password":"supersecret123"}' | jq
 
-# 4. Login
-curl -X POST http://localhost/auth/login \
+# 6. Log in and capture the tokens
+TOKEN=$(curl -s -X POST http://localhost/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"login":"alice","password":"supersecret123"}'
+  -d '{"login":"alice","password":"supersecret123"}' | jq -r .accessToken)
+
+# 7. Create an org
+curl -s -X POST http://localhost/orgs \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Acme","slug":"acme"}' | jq
+
+# 8. Create a repo (replace <orgId> with the id from the previous response)
+curl -s -X POST http://localhost/orgs/<orgId>/repos \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"My Repo","slug":"my-repo","isPrivate":false}' | jq
+
+# 9. Clone it
+git clone http://alice:supersecret123@localhost/acme/my-repo.git
 ```
+
+---
+
+## Configuration
+
+All configuration is via environment variables. Copy `.env.example` to `.env` and fill in the values.
+
+| Variable | Default | Description |
+|---|---|---|
+| `POSTGRES_USER` | `scm` | PostgreSQL username |
+| `POSTGRES_PASSWORD` | — | PostgreSQL password **(required)** |
+| `POSTGRES_DB` | `scm` | PostgreSQL database name |
+| `DATABASE_URL` | — | Full Postgres connection string |
+| `REDIS_URL` | — | Redis connection string |
+| `REDIS_PASSWORD` | `redispass` | Redis AUTH password |
+| `JWT_PRIVATE_KEY_B64` | — | Base64-encoded RS256 private key PEM **(generated by `gen-keys.sh`)** |
+| `JWT_PUBLIC_KEY_B64` | — | Base64-encoded RS256 public key PEM **(generated by `gen-keys.sh`)** |
+| `ACCESS_TOKEN_TTL_SECONDS` | `900` | Access token lifetime (15 min) |
+| `REFRESH_TOKEN_TTL_SECONDS` | `604800` | Refresh token lifetime (7 days) |
+| `CORS_ORIGINS` | `http://localhost` | Comma-separated allowed CORS origins |
+| `GIT_REPOS_ROOT` | `/data/repos` | Filesystem root for bare git repos |
+| `WEBHOOK_TIMEOUT_MS` | `10000` | Per-request webhook delivery timeout |
+| `WEBHOOK_MAX_RETRIES` | `3` | Max delivery retries (exponential backoff) |
+
+---
+
+## Project Structure
+
+```
+SCM/
+├── docker-compose.yml          # All services wired together
+├── .env.example                # Environment variable template
+├── nginx/
+│   └── nginx.conf              # Reverse proxy, rate limiting, streaming config
+├── scripts/
+│   ├── gen-keys.sh             # Generates RS256 key pair → .env
+│   └── init-db.sql             # Idempotent schema bootstrap (run on first Postgres start)
+└── api/
+    ├── Dockerfile              # Multi-stage build (builder → runtime, non-root user)
+    ├── package.json
+    ├── tsconfig.json
+    └── src/
+        ├── app.ts              # Fastify setup, plugin registration, health endpoint
+        ├── config.ts           # Zod-validated env config (fail-fast on startup)
+        ├── types/
+        │   └── index.ts        # Shared types: OrgRole, RepoRole, JwtPayload, etc.
+        ├── db/
+        │   ├── client.ts       # Drizzle ORM + pg connection pool
+        │   └── schema.ts       # All 11 table definitions with indexes
+        ├── middleware/
+        │   ├── auth.ts         # JWT RS256 verification, Redis blocklist check
+        │   ├── rbac.ts         # requireRepoAccess / requireOrgRole guard factories
+        │   └── rateLimiter.ts  # Redis sliding-window limiter (IP + per-user)
+        ├── routes/
+        │   ├── auth.ts         # /auth — register, login, refresh, logout
+        │   ├── users.ts        # /users — profile, update
+        │   ├── orgs.ts         # /orgs — CRUD + membership management
+        │   ├── repos.ts        # /orgs/:orgId/repos — CRUD, branches, tags, commits
+        │   ├── git.ts          # /:org/:repo.git — smart-HTTP upload/receive-pack
+        │   ├── pullRequests.ts # /repos/:repoId/pulls — PR lifecycle + reviews + comments
+        │   └── webhooks.ts     # /repos/:repoId/hooks — CRUD + delivery log
+        └── services/
+            ├── auth.service.ts     # Argon2id hashing, JWT issuance, token revocation
+            ├── git.service.ts      # Spawns git-upload/receive-pack, streams stdin/stdout
+            ├── repo.service.ts     # bare repo init/delete, branch/tag/commit queries
+            ├── pr.service.ts       # PR number sequencing, merge logic
+            └── webhook.service.ts  # HMAC signing, HTTP dispatch, retry, delivery logging
+```
+
+---
 
 ## API Reference
 
+All endpoints accept and return `application/json`. Authenticated endpoints require:
+
+```
+Authorization: Bearer <accessToken>
+```
+
 ### Auth
-| Method | Path | Description |
-|---|---|---|
-| POST | `/auth/register` | Create account |
-| POST | `/auth/login` | Login → JWT pair |
-| POST | `/auth/refresh` | Rotate refresh token |
-| POST | `/auth/logout` | Revoke tokens |
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/auth/register` | — | Create a new account |
+| `POST` | `/auth/login` | — | Authenticate → `{ accessToken, refreshToken }` |
+| `POST` | `/auth/refresh` | — | Rotate refresh token → new token pair |
+| `POST` | `/auth/logout` | Required | Revoke access + refresh tokens |
+
+**Register**
+```json
+{ "username": "alice", "email": "alice@example.com", "password": "supersecret123" }
+```
+
+**Login**
+```json
+{ "login": "alice", "password": "supersecret123" }
+```
 
 ### Users
-| Method | Path | Description |
-|---|---|---|
-| GET | `/users/me` | Current user profile |
-| GET | `/users/:username` | Public profile |
-| PATCH | `/users/me` | Update email/password |
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/users/me` | Required | Current user's full profile |
+| `GET` | `/users/:username` | Required | Public profile by username |
+| `PATCH` | `/users/me` | Required | Update email or password |
 
 ### Organizations
-| Method | Path | Description |
-|---|---|---|
-| POST | `/orgs` | Create org |
-| GET | `/orgs/:orgId` | Get org |
-| PATCH | `/orgs/:orgId` | Update org (admin+) |
-| DELETE | `/orgs/:orgId` | Delete org (owner) |
-| GET | `/orgs/:orgId/members` | List members |
-| POST | `/orgs/:orgId/members` | Add member (admin+) |
-| PATCH | `/orgs/:orgId/members/:userId` | Update role (admin+) |
-| DELETE | `/orgs/:orgId/members/:userId` | Remove member (admin+) |
+
+| Method | Path | Required Role | Description |
+|---|---|---|---|
+| `POST` | `/orgs` | Any authenticated | Create org (caller becomes owner) |
+| `GET` | `/orgs/:orgId` | Any authenticated | Get org details |
+| `PATCH` | `/orgs/:orgId` | Org admin+ | Update name / description |
+| `DELETE` | `/orgs/:orgId` | Org owner | Delete org and all repos |
+| `GET` | `/orgs/:orgId/members` | Org guest+ | List members |
+| `POST` | `/orgs/:orgId/members` | Org admin+ | Add member by username |
+| `PATCH` | `/orgs/:orgId/members/:userId` | Org admin+ | Change member role |
+| `DELETE` | `/orgs/:orgId/members/:userId` | Org admin+ | Remove member |
 
 ### Repositories
-| Method | Path | Description |
-|---|---|---|
-| GET | `/orgs/:orgId/repos` | List repos |
-| POST | `/orgs/:orgId/repos` | Create repo |
-| GET | `/orgs/:orgId/repos/:repoId` | Get repo |
-| PATCH | `/orgs/:orgId/repos/:repoId` | Update repo (admin+) |
-| DELETE | `/orgs/:orgId/repos/:repoId` | Delete repo (admin+) |
-| GET | `/orgs/:orgId/repos/:repoId/branches` | List branches |
-| GET | `/orgs/:orgId/repos/:repoId/tags` | List tags |
-| GET | `/orgs/:orgId/repos/:repoId/commits` | Commit log |
-| POST | `/orgs/:orgId/repos/:repoId/collaborators` | Add collaborator |
-| DELETE | `/orgs/:orgId/repos/:repoId/collaborators/:userId` | Remove collaborator |
+
+| Method | Path | Required Role | Description |
+|---|---|---|---|
+| `GET` | `/orgs/:orgId/repos` | Any authenticated | List repos in org |
+| `POST` | `/orgs/:orgId/repos` | Org member+ | Create repo |
+| `GET` | `/orgs/:orgId/repos/:repoId` | Repo read+ | Get repo details |
+| `PATCH` | `/orgs/:orgId/repos/:repoId` | Repo admin | Update metadata / visibility |
+| `DELETE` | `/orgs/:orgId/repos/:repoId` | Repo admin | Delete repo + bare repo on disk |
+| `GET` | `/orgs/:orgId/repos/:repoId/branches` | Repo read | List branches |
+| `GET` | `/orgs/:orgId/repos/:repoId/tags` | Repo read | List tags |
+| `GET` | `/orgs/:orgId/repos/:repoId/commits?branch=main&limit=30&offset=0` | Repo read | Paginated commit log |
+| `POST` | `/orgs/:orgId/repos/:repoId/collaborators` | Repo admin | Add collaborator |
+| `DELETE` | `/orgs/:orgId/repos/:repoId/collaborators/:userId` | Repo admin | Remove collaborator |
 
 ### Git Smart-HTTP
+
+Standard git operations work over HTTP. Credentials are sent as HTTP Basic Auth.
+
+```bash
+# Clone
+git clone http://<user>:<password>@localhost/<org-slug>/<repo-slug>.git
+
+# Push
+git push origin main
+
+# Fetch
+git fetch origin
 ```
-git clone http://localhost/<org-slug>/<repo-slug>.git
-```
+
+Endpoints proxied through Nginx with request buffering disabled for streaming pack data:
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/:org/:repo.git/info/refs?service=git-upload-pack` | Read+ | Fetch/clone ref discovery |
+| `POST` | `/:org/:repo.git/git-upload-pack` | Read+ | Pack data for fetch/clone |
+| `GET` | `/:org/:repo.git/info/refs?service=git-receive-pack` | Write+ | Push ref discovery |
+| `POST` | `/:org/:repo.git/git-receive-pack` | Write+ | Receive pushed pack data |
 
 ### Pull Requests
-| Method | Path | Description |
-|---|---|---|
-| GET | `/repos/:repoId/pulls` | List PRs |
-| POST | `/repos/:repoId/pulls` | Open PR |
-| GET | `/repos/:repoId/pulls/:prId` | Get PR |
-| PATCH | `/repos/:repoId/pulls/:prId` | Edit PR |
-| POST | `/repos/:repoId/pulls/:prId/close` | Close PR |
-| POST | `/repos/:repoId/pulls/:prId/merge` | Merge PR |
-| POST | `/repos/:repoId/pulls/:prId/reviews` | Submit review |
-| GET | `/repos/:repoId/pulls/:prId/reviews` | List reviews |
-| POST | `/repos/:repoId/pulls/:prId/comments` | Add comment |
-| GET | `/repos/:repoId/pulls/:prId/comments` | List comments |
+
+| Method | Path | Required Role | Description |
+|---|---|---|---|
+| `GET` | `/repos/:repoId/pulls?status=open` | Repo read | List PRs (filter by status) |
+| `POST` | `/repos/:repoId/pulls` | Repo read | Open a PR |
+| `GET` | `/repos/:repoId/pulls/:prId` | Repo read | Get PR details |
+| `PATCH` | `/repos/:repoId/pulls/:prId` | PR author | Edit title / body |
+| `POST` | `/repos/:repoId/pulls/:prId/close` | Repo write | Close PR |
+| `POST` | `/repos/:repoId/pulls/:prId/merge` | Repo write | Merge PR (auto fast-forward or merge commit) |
+| `POST` | `/repos/:repoId/pulls/:prId/reviews` | Repo read | Submit review (approved / changes_requested / commented) |
+| `GET` | `/repos/:repoId/pulls/:prId/reviews` | Repo read | List reviews |
+| `POST` | `/repos/:repoId/pulls/:prId/comments` | Repo read | Add inline or general comment |
+| `GET` | `/repos/:repoId/pulls/:prId/comments` | Repo read | List comments |
+
+**Open a PR**
+```json
+{
+  "title": "Add login page",
+  "body": "Implements the login flow described in #42.",
+  "sourceBranch": "feature/login",
+  "targetBranch": "main"
+}
+```
 
 ### Webhooks
-| Method | Path | Description |
-|---|---|---|
-| GET | `/repos/:repoId/hooks` | List hooks |
-| POST | `/repos/:repoId/hooks` | Create hook |
-| GET | `/repos/:repoId/hooks/:hookId` | Get hook |
-| PATCH | `/repos/:repoId/hooks/:hookId` | Update hook |
-| DELETE | `/repos/:repoId/hooks/:hookId` | Delete hook |
-| GET | `/repos/:repoId/hooks/:hookId/deliveries` | Delivery log |
+
+| Method | Path | Required Role | Description |
+|---|---|---|---|
+| `GET` | `/repos/:repoId/hooks` | Repo admin | List webhooks |
+| `POST` | `/repos/:repoId/hooks` | Repo admin | Create webhook |
+| `GET` | `/repos/:repoId/hooks/:hookId` | Repo admin | Get webhook |
+| `PATCH` | `/repos/:repoId/hooks/:hookId` | Repo admin | Update URL / secret / events |
+| `DELETE` | `/repos/:repoId/hooks/:hookId` | Repo admin | Delete webhook |
+| `GET` | `/repos/:repoId/hooks/:hookId/deliveries?limit=50` | Repo admin | Delivery log |
+
+**Create a webhook**
+```json
+{
+  "url": "https://ci.example.com/hook",
+  "secret": "a-long-random-secret-string",
+  "events": ["push", "pull_request"]
+}
+```
+
+---
 
 ## Security
 
-- Passwords hashed with **Argon2id** (memory=64 MiB, iterations=3, parallelism=4)
-- JWT **RS256** access tokens (15 min) + rotating refresh tokens (7 days, stored as SHA-256 hash)
-- Revoked access tokens blocklisted in Redis until expiry
-- **Redis sliding-window** rate limiting: 100 req/min per IP, 20 req/min on auth endpoints
-- Webhook payloads signed with **HMAC-SHA256** (`X-SCM-Signature-256` header)
-- Git repository paths are UUID-based — user input never reaches the filesystem
-- All inputs validated with **Zod** schemas; unknown fields rejected
-- **Helmet.js** security headers (CSP, HSTS, X-Frame-Options, etc.)
-- Nginx: `client_max_body_size 512m`, request buffering off for git streams
+| Concern | Implementation |
+|---|---|
+| Password storage | Argon2id — memory=64 MiB, time=3, parallelism=4 |
+| Authentication | JWT RS256 — access token 15 min, refresh token 7 days |
+| Token revocation | Refresh rows in Postgres (SHA-256 hashed) + Redis blocklist for access tokens |
+| Transport | Nginx with HSTS; swap self-signed cert for Let's Encrypt in production |
+| Rate limiting | Redis sliding window: 100 req/min per IP globally, 20 req/min on `/auth/*` |
+| Input validation | Zod on every route — strict mode, unknown fields rejected |
+| SQL injection | Drizzle ORM parameterized queries — no raw string interpolation anywhere |
+| Path traversal | Git disk paths are UUID-based; user-supplied slugs never touch the filesystem |
+| Webhook integrity | `X-SCM-Signature-256: sha256=<hmac>` on every delivery |
+| Security headers | Helmet.js — CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy |
+| CORS | Allowlist-only origins from `CORS_ORIGINS` env var |
+| Least privilege | API container runs as non-root `scm` user |
+| Network isolation | Postgres and Redis are on an internal Docker network, never exposed to host |
+| Timing attacks | Login always runs Argon2id even when the user does not exist |
 
-## RBAC
+---
+
+## RBAC Model
+
+Permissions are hierarchical. A higher role always implies all permissions of lower roles. Explicit repo collaborator roles override the org-level baseline.
 
 ```
-Superadmin
-  └── Org owner  → full org + repo control
-      └── Org admin  → manage members, repos
-          └── Org member → create repos, write access
-              └── Org guest  → read public repos
-                  └── Repo collaborator override (admin | write | read)
+Superadmin  ─── full system access
+  └── Org owner    ─── full org + all repos
+      └── Org admin    ─── manage members, create/delete repos
+          └── Org member   ─── create repos, write to all org repos
+              └── Org guest    ─── read public repos
+                  └── Repo collaborator override
+                        admin | write | read
+```
+
+**Effective access resolution order:**
+1. Superadmin flag → always admin everywhere
+2. Explicit repo collaborator role → use that
+3. Org membership role → map to repo role (owner/admin → repo admin, member → write, guest → read on public only)
+4. No match + public repo → read
+5. No match + private repo → 403
+
+---
+
+## Webhooks
+
+When a push or PR event occurs, SCM:
+
+1. Looks up all active webhooks for the repo that subscribe to the event
+2. Signs the JSON payload: `X-SCM-Signature-256: sha256=HMAC-SHA256(secret, body)`
+3. POSTs to the configured URL with a `config.webhookTimeoutMs` timeout
+4. On 5xx or network error, retries up to `config.webhookMaxRetries` times with exponential backoff (1s, 2s, 4s, …)
+5. Records every attempt in `webhook_deliveries` (status code, duration, error)
+
+**Verifying signatures (receiver side)**
+```js
+const crypto = require('crypto');
+const sig = req.headers['x-scm-signature-256'];
+const expected = 'sha256=' + crypto.createHmac('sha256', SECRET).update(rawBody).digest('hex');
+const valid = crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+```
+
+---
+
+## Development
+
+```bash
+cd api
+npm install
+
+# Run with hot-reload (requires a running Postgres + Redis — use docker compose for deps only)
+docker compose up -d postgres redis
+npm run dev
+```
+
+Type-check without building:
+```bash
+npm run typecheck
+```
+
+Build for production:
+```bash
+npm run build   # outputs to api/dist/
+```
+
+---
+
+## Production Deployment
+
+### TLS
+
+Replace Nginx port 80 with 443 + a real certificate. The simplest path:
+
+```nginx
+listen 443 ssl;
+ssl_certificate     /etc/letsencrypt/live/scm.example.com/fullchain.pem;
+ssl_certificate_key /etc/letsencrypt/live/scm.example.com/privkey.pem;
+```
+
+Add a port 80 → 443 redirect block.
+
+### Scaling
+
+- The API is stateless — run multiple replicas behind Nginx `upstream` with `keepalive`.
+- Postgres: promote to a managed instance (RDS, Cloud SQL) or add a read replica + PgBouncer.
+- Redis: use Redis Sentinel or a managed instance for HA.
+- Git repos: mount the `/data/repos` volume on shared network storage (NFS, EFS, GCS Fuse) when running multiple API replicas.
+
+### Secrets
+
+In production never commit `.env`. Inject secrets via:
+- Docker secrets / `docker compose` secrets
+- Kubernetes Secrets + a CSI secrets driver
+- A secrets manager (AWS Secrets Manager, HashiCorp Vault)
+
+### Backups
+
+```bash
+# Postgres dump
+docker compose exec postgres pg_dump -U scm scm | gzip > scm-$(date +%F).sql.gz
+
+# Git repos volume
+tar -czf repos-$(date +%F).tar.gz /var/lib/docker/volumes/scm_git_repos
 ```
