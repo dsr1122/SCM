@@ -3,15 +3,16 @@ import { eq, and } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { organizations, repositories } from '../db/schema.js';
 import { optionalAuth } from '../middleware/auth.js';
-import { resolveRepoAccess } from '../middleware/rbac.js';
+import { resolveRepoAccess, REPO_ROLE_RANK } from '../middleware/rbac.js';
 import { infoRefs, runGitProcess } from '../services/git.service.js';
 import { dispatchWebhookEvent } from '../services/webhook.service.js';
+import { checkPushAllowed } from '../services/branchProtection.service.js';
+import { logAuditEvent } from '../services/audit.service.js';
 
 async function resolveRepo(orgSlug: string, repoSlug: string) {
   const [org] = await db.select({ id: organizations.id })
     .from(organizations).where(eq(organizations.slug, orgSlug)).limit(1);
   if (!org) return null;
-
   const [repo] = await db.select()
     .from(repositories)
     .where(and(eq(repositories.orgId, org.id), eq(repositories.slug, repoSlug)))
@@ -20,7 +21,6 @@ async function resolveRepo(orgSlug: string, repoSlug: string) {
 }
 
 export default async function gitRoutes(app: FastifyInstance) {
-  // GET /:orgSlug/:repoSlug.git/info/refs?service=git-upload-pack|git-receive-pack
   app.get('/info/refs', { preHandler: [optionalAuth] }, async (req, reply) => {
     const { orgSlug, repoSlug } = req.params as { orgSlug: string; repoSlug: string };
     const query = req.query as Record<string, string>;
@@ -43,8 +43,7 @@ export default async function gitRoutes(app: FastifyInstance) {
       }
     } else {
       const { role } = await resolveRepoAccess(userId, repo.id);
-      const rank = { admin: 3, write: 2, read: 1, null: 0 };
-      if ((rank[role ?? 'null'] ?? 0) < rank[requiredRole]) {
+      if (!role || REPO_ROLE_RANK[role] < REPO_ROLE_RANK[requiredRole]) {
         return reply.status(403).send('Forbidden');
       }
     }
@@ -52,7 +51,6 @@ export default async function gitRoutes(app: FastifyInstance) {
     await infoRefs(req, reply, service, repo.diskPath);
   });
 
-  // POST /:orgSlug/:repoSlug.git/git-upload-pack  (fetch/clone)
   app.post('/git-upload-pack', { preHandler: [optionalAuth] }, async (req, reply) => {
     const { orgSlug, repoSlug } = req.params as { orgSlug: string; repoSlug: string };
     const repo = await resolveRepo(orgSlug, repoSlug);
@@ -70,7 +68,6 @@ export default async function gitRoutes(app: FastifyInstance) {
     await runGitProcess(req, reply, 'git-upload-pack', repo.diskPath, true);
   });
 
-  // POST /:orgSlug/:repoSlug.git/git-receive-pack  (push)
   app.post('/git-receive-pack', { preHandler: [optionalAuth] }, async (req, reply) => {
     const { orgSlug, repoSlug } = req.params as { orgSlug: string; repoSlug: string };
     const repo = await resolveRepo(orgSlug, repoSlug);
@@ -84,9 +81,17 @@ export default async function gitRoutes(app: FastifyInstance) {
     const { role } = await resolveRepoAccess(req.user.id, repo.id);
     if (!role || role === 'read') return reply.status(403).send('Forbidden');
 
+    // Branch protection check on the default branch (conservative — full ref parsing
+    // would require buffering the pack, which we avoid for streaming. Check default branch.)
+    const check = await checkPushAllowed(repo.id, repo.defaultBranch, req.user.id, false);
+    if (!check.allowed) {
+      return reply.status(403).send(check.reason ?? 'Push rejected by branch protection rule');
+    }
+
     await runGitProcess(req, reply, 'git-receive-pack', repo.diskPath, true);
 
-    // Fire-and-forget webhook dispatch
+    logAuditEvent({ actorId: req.user.id, actorUsername: req.user.username, action: 'repo.pushed', resourceType: 'repository', resourceId: repo.id, repoId: repo.id, ipAddress: req.ip });
+
     setImmediate(() => {
       dispatchWebhookEvent(repo.id, 'push', {
         repository: { id: repo.id, slug: repo.slug },

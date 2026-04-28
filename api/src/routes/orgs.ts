@@ -6,6 +6,8 @@ import { organizations, orgMembers, users } from '../db/schema.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireOrgRole } from '../middleware/rbac.js';
 import type { OrgRole } from '../types/index.js';
+import { logAuditEvent } from '../services/audit.service.js';
+import { notifyOrgInvite } from '../services/email.service.js';
 
 const createBody = z.object({
   name:        z.string().min(1).max(100),
@@ -35,6 +37,7 @@ export default async function orgRoutes(app: FastifyInstance) {
     // Creator becomes owner
     await db.insert(orgMembers).values({ orgId: org!.id, userId: req.user!.id, role: 'owner' });
 
+    logAuditEvent({ actorId: req.user!.id, actorUsername: req.user!.username, action: 'org.created', resourceType: 'organization', resourceId: org!.id, orgId: org!.id, metadata: { slug: parsed.data.slug }, ipAddress: req.ip });
     return reply.status(201).send(org);
   });
 
@@ -64,6 +67,7 @@ export default async function orgRoutes(app: FastifyInstance) {
   app.delete('/:orgId', { preHandler: [requireAuth, requireOrgRole('owner')] }, async (req, reply) => {
     const { orgId } = req.params as { orgId: string };
     await db.delete(organizations).where(eq(organizations.id, orgId));
+    logAuditEvent({ actorId: req.user!.id, actorUsername: req.user!.username, action: 'org.deleted', resourceType: 'organization', resourceId: orgId, orgId, ipAddress: req.ip });
     return reply.status(204).send();
   });
 
@@ -100,6 +104,12 @@ export default async function orgRoutes(app: FastifyInstance) {
         target: [orgMembers.orgId, orgMembers.userId],
         set: { role: parsed.data.role },
       });
+
+    logAuditEvent({ actorId: req.user!.id, actorUsername: req.user!.username, action: 'org.member_added', resourceType: 'user', resourceId: target.id, orgId, metadata: { role: parsed.data.role }, ipAddress: req.ip });
+
+    // Fetch org name for email notification
+    const [org] = await db.select({ name: organizations.name }).from(organizations).where(eq(organizations.id, orgId)).limit(1);
+    if (org) notifyOrgInvite(target.id, org.name, req.user!.username);
 
     return reply.status(201).send({ userId: target.id, role: parsed.data.role });
   });

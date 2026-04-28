@@ -1,7 +1,8 @@
 import { db } from '../db/client.js';
 import { pullRequests, repositories } from '../db/schema.js';
-import { eq, and, sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { mergeBase, fastForwardMerge, mergeCommit } from './repo.service.js';
+import { checkMergeAllowed } from './branchProtection.service.js';
 
 export async function nextPrNumber(repoId: string): Promise<number> {
   const [row] = await db
@@ -21,6 +22,10 @@ export async function mergePullRequest(
   const [pr] = await db.select().from(pullRequests).where(eq(pullRequests.id, prId)).limit(1);
   if (!pr) throw new Error('PR not found');
   if (pr.status !== 'open') throw new Error(`PR is already ${pr.status}`);
+
+  // Branch protection enforcement
+  const mergeCheck = await checkMergeAllowed(prId);
+  if (!mergeCheck.allowed) throw new Error(mergeCheck.reason ?? 'Merge blocked by branch protection');
 
   const [repo] = await db
     .select({ diskPath: repositories.diskPath })

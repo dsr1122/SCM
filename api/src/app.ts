@@ -5,13 +5,18 @@ import { config } from './config.js';
 import { checkDbConnection } from './db/client.js';
 import { redis } from './middleware/rateLimiter.js';
 
-import authRoutes from './routes/auth.js';
-import userRoutes from './routes/users.js';
-import orgRoutes from './routes/orgs.js';
-import repoRoutes from './routes/repos.js';
-import gitRoutes from './routes/git.js';
-import prRoutes from './routes/pullRequests.js';
-import webhookRoutes from './routes/webhooks.js';
+import authRoutes     from './routes/auth.js';
+import userRoutes     from './routes/users.js';
+import orgRoutes      from './routes/orgs.js';
+import repoRoutes     from './routes/repos.js';
+import gitRoutes      from './routes/git.js';
+import prRoutes       from './routes/pullRequests.js';
+import webhookRoutes  from './routes/webhooks.js';
+import twoFactorRoutes from './routes/twoFactor.js';
+import ssoRoutes      from './routes/sso.js';
+import teamRoutes     from './routes/teams.js';
+import bpRoutes       from './routes/branchProtection.js';
+import adminRoutes    from './routes/admin.js';
 
 const app = Fastify({
   logger: {
@@ -23,15 +28,12 @@ const app = Fastify({
   requestIdHeader: 'x-request-id',
   requestIdLogLabel: 'requestId',
   trustProxy: true,
-  bodyLimit: 536_870_912, // 512 MiB — large git pack files come via body
+  bodyLimit: 536_870_912,
 });
 
 await app.register(helmet, {
   contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'none'"],
-      scriptSrc: ["'none'"],
-    },
+    directives: { defaultSrc: ["'none'"], scriptSrc: ["'none'"] },
   },
   hsts: { maxAge: 31_536_000, includeSubDomains: true },
 });
@@ -43,13 +45,18 @@ await app.register(cors, {
 });
 
 // ── Routes ──────────────────────────────────────────────────────────────────
-await app.register(authRoutes,    { prefix: '/auth' });
-await app.register(userRoutes,    { prefix: '/users' });
-await app.register(orgRoutes,     { prefix: '/orgs' });
-await app.register(repoRoutes,    { prefix: '/orgs/:orgId/repos' });
-await app.register(gitRoutes,     { prefix: '/:orgSlug/:repoSlug.git' });
-await app.register(prRoutes,      { prefix: '/repos/:repoId/pulls' });
-await app.register(webhookRoutes, { prefix: '/repos/:repoId/hooks' });
+await app.register(authRoutes,      { prefix: '/auth' });
+await app.register(twoFactorRoutes, { prefix: '/auth/2fa' });
+await app.register(ssoRoutes,       { prefix: '/auth/sso' });
+await app.register(userRoutes,      { prefix: '/users' });
+await app.register(orgRoutes,       { prefix: '/orgs' });
+await app.register(teamRoutes,      { prefix: '/orgs/:orgId/teams' });
+await app.register(repoRoutes,      { prefix: '/orgs/:orgId/repos' });
+await app.register(gitRoutes,       { prefix: '/:orgSlug/:repoSlug.git' });
+await app.register(prRoutes,        { prefix: '/repos/:repoId/pulls' });
+await app.register(webhookRoutes,   { prefix: '/repos/:repoId/hooks' });
+await app.register(bpRoutes,        { prefix: '/repos/:repoId/branch-protection' });
+await app.register(adminRoutes,     { prefix: '/admin' });
 
 // ── Health ──────────────────────────────────────────────────────────────────
 app.get('/health', async (_req, reply) => {
@@ -62,13 +69,10 @@ app.get('/health', async (_req, reply) => {
   }
 });
 
-// ── Global error handler ────────────────────────────────────────────────────
 app.setErrorHandler((err, _req, reply) => {
   app.log.error(err);
   const status = err.statusCode ?? 500;
-  reply.status(status).send({
-    error: status < 500 ? err.message : 'Internal server error',
-  });
+  reply.status(status).send({ error: status < 500 ? err.message : 'Internal server error' });
 });
 
 app.setNotFoundHandler((_req, reply) => {

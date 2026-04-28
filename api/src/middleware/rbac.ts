@@ -1,19 +1,22 @@
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { db } from '../db/client.js';
-import { repositories, orgMembers, repoCollaborators } from '../db/schema.js';
+import { repositories, orgMembers, repoCollaborators, teamMembers, teamRepoPermissions } from '../db/schema.js';
 import { and, eq } from 'drizzle-orm';
 import type { OrgRole, RepoRole } from '../types/index.js';
 
 const ORG_ROLE_RANK: Record<OrgRole, number> = {
   owner: 4, admin: 3, member: 2, guest: 1,
 };
-const REPO_ROLE_RANK: Record<RepoRole, number> = {
+export const REPO_ROLE_RANK: Record<RepoRole, number> = {
   admin: 3, write: 2, read: 1,
 };
 
 // Resolves effective repo access for the authenticated user.
-// Org owners/admins inherit repo admin. Org members inherit read.
-// Explicit collaborator role overrides org baseline.
+// Resolution order (highest wins):
+//   1. Explicit repo collaborator role
+//   2. Org membership role (owner/admin → admin, member → write, guest → read on public)
+//   3. Team repo permissions (highest team role for user's teams)
+//   4. Public repo → read for anyone
 export async function resolveRepoAccess(
   userId: string,
   repoId: string,
@@ -26,30 +29,52 @@ export async function resolveRepoAccess(
 
   if (!repo) return { role: null, repo: null };
 
+  // 1. Explicit collaborator
   const [collab] = await db
     .select({ role: repoCollaborators.role })
     .from(repoCollaborators)
     .where(and(eq(repoCollaborators.repoId, repoId), eq(repoCollaborators.userId, userId)))
     .limit(1);
-
   if (collab) return { role: collab.role as RepoRole, repo };
 
+  // 2. Org membership
   const [member] = await db
     .select({ role: orgMembers.role })
     .from(orgMembers)
     .where(and(eq(orgMembers.orgId, repo.orgId), eq(orgMembers.userId, userId)))
     .limit(1);
 
-  if (!member) {
-    // Public repos: anonymous read
-    if (!repo.isPrivate) return { role: 'read', repo };
-    return { role: null, repo };
+  let orgDerivedRole: RepoRole | null = null;
+  if (member) {
+    const orgRole = member.role as OrgRole;
+    if (ORG_ROLE_RANK[orgRole] >= ORG_ROLE_RANK['admin']) orgDerivedRole = 'admin';
+    else if (ORG_ROLE_RANK[orgRole] >= ORG_ROLE_RANK['member']) orgDerivedRole = 'write';
+    else if (!repo.isPrivate) orgDerivedRole = 'read';
   }
 
-  const orgRole = member.role as OrgRole;
-  if (ORG_ROLE_RANK[orgRole] >= ORG_ROLE_RANK['admin']) return { role: 'admin', repo };
-  if (ORG_ROLE_RANK[orgRole] >= ORG_ROLE_RANK['member']) return { role: 'write', repo };
-  // guest
+  // 3. Team permissions
+  const teamPerms = await db
+    .select({ role: teamRepoPermissions.role })
+    .from(teamRepoPermissions)
+    .innerJoin(teamMembers, eq(teamMembers.teamId, teamRepoPermissions.teamId))
+    .where(and(eq(teamRepoPermissions.repoId, repoId), eq(teamMembers.userId, userId)));
+
+  let teamDerivedRole: RepoRole | null = null;
+  for (const perm of teamPerms) {
+    const r = perm.role as RepoRole;
+    if (!teamDerivedRole || REPO_ROLE_RANK[r] > REPO_ROLE_RANK[teamDerivedRole]) {
+      teamDerivedRole = r;
+    }
+  }
+
+  // Pick highest of org-derived vs team-derived
+  const candidates = [orgDerivedRole, teamDerivedRole].filter(Boolean) as RepoRole[];
+  if (candidates.length > 0) {
+    const best = candidates.reduce((a, b) => (REPO_ROLE_RANK[a] >= REPO_ROLE_RANK[b] ? a : b));
+    return { role: best, repo };
+  }
+
+  // 4. Public fallback
   if (!repo.isPrivate) return { role: 'read', repo };
   return { role: null, repo };
 }

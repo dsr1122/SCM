@@ -7,6 +7,8 @@ import { requireAuth } from '../middleware/auth.js';
 import { requireRepoAccess } from '../middleware/rbac.js';
 import { nextPrNumber, mergePullRequest } from '../services/pr.service.js';
 import { dispatchWebhookEvent } from '../services/webhook.service.js';
+import { logAuditEvent } from '../services/audit.service.js';
+import { notifyPrReviewSubmitted, notifyPrCommentAdded, notifyPrMergedOrClosed } from '../services/email.service.js';
 
 const createPrBody = z.object({
   title:        z.string().min(1).max(255),
@@ -66,11 +68,9 @@ export default async function prRoutes(app: FastifyInstance) {
     }).returning();
 
     setImmediate(() => {
-      dispatchWebhookEvent(repoId, 'pull_request', {
-        action: 'opened',
-        pullRequest: pr,
-      }).catch(() => undefined);
+      dispatchWebhookEvent(repoId, 'pull_request', { action: 'opened', pullRequest: pr }).catch(() => undefined);
     });
+    logAuditEvent({ actorId: req.user!.id, actorUsername: req.user!.username, action: 'pr.opened', resourceType: 'pull_request', resourceId: pr!.id, repoId, metadata: { title: parsed.data.title }, ipAddress: req.ip });
 
     return reply.status(201).send(pr);
   });
@@ -114,6 +114,10 @@ export default async function prRoutes(app: FastifyInstance) {
       .set({ status: 'closed', updatedAt: new Date() })
       .where(eq(pullRequests.id, prId))
       .returning();
+
+    logAuditEvent({ actorId: req.user!.id, actorUsername: req.user!.username, action: 'pr.closed', resourceType: 'pull_request', resourceId: prId, repoId: pr.repoId, ipAddress: req.ip });
+    notifyPrMergedOrClosed(pr.authorId, req.user!.username, pr.title, `/repos/${pr.repoId}/pulls/${prId}`, 'closed');
+
     return reply.send(updated);
   });
 
@@ -128,6 +132,8 @@ export default async function prRoutes(app: FastifyInstance) {
 
     try {
       const result = await mergePullRequest(prId, req.user!.username, actor?.email ?? '');
+      logAuditEvent({ actorId: req.user!.id, actorUsername: req.user!.username, action: 'pr.merged', resourceType: 'pull_request', resourceId: prId, repoId: pr.repoId, metadata: { sha: result.sha, strategy: result.strategy }, ipAddress: req.ip });
+      notifyPrMergedOrClosed(pr.authorId, req.user!.username, pr.title, `/repos/${pr.repoId}/pulls/${prId}`, 'merged');
       return reply.send({ merged: true, sha: result.sha, strategy: result.strategy });
     } catch (err) {
       return reply.status(422).send({ error: String(err) });
@@ -152,6 +158,11 @@ export default async function prRoutes(app: FastifyInstance) {
       state: parsed.data.state,
       body: parsed.data.body,
     }).returning();
+
+    const [prRecord] = await db.select({ authorId: pullRequests.authorId, title: pullRequests.title, repoId: pullRequests.repoId }).from(pullRequests).where(eq(pullRequests.id, prId)).limit(1);
+    if (prRecord) {
+      notifyPrReviewSubmitted(prRecord.authorId, req.user!.username, prRecord.title, `/repos/${prRecord.repoId}/pulls/${prId}`);
+    }
 
     return reply.status(201).send(review);
   });
@@ -178,6 +189,11 @@ export default async function prRoutes(app: FastifyInstance) {
       authorId: req.user!.id,
       ...parsed.data,
     }).returning();
+
+    const [prRecord] = await db.select({ authorId: pullRequests.authorId, title: pullRequests.title, repoId: pullRequests.repoId }).from(pullRequests).where(eq(pullRequests.id, prId)).limit(1);
+    if (prRecord && prRecord.authorId !== req.user!.id) {
+      notifyPrCommentAdded(prRecord.authorId, req.user!.username, prRecord.title, `/repos/${prRecord.repoId}/pulls/${prId}`);
+    }
 
     return reply.status(201).send(comment);
   });

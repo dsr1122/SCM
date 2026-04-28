@@ -23,6 +23,7 @@ A self-hosted, GitHub/GitLab-style source code management platform. Built for se
 
 ## Features
 
+### Core
 - **Git smart-HTTP** — clone, fetch, and push via standard `git` CLI over HTTP
 - **Organizations** — multi-tenant org model with member roles
 - **Repositories** — private/public repos with per-collaborator role overrides
@@ -33,6 +34,17 @@ A self-hosted, GitHub/GitLab-style source code management platform. Built for se
 - **RBAC** — five-tier permission model from superadmin down to repo-level collaborator
 - **Rate limiting** — Redis sliding-window per IP and per user
 - **Security headers** — Helmet.js (CSP, HSTS, X-Frame-Options, Referrer-Policy)
+
+### Enterprise
+- **Immutable Audit Log** — every user action (login, push, merge, member change, etc.) recorded with actor, IP, and metadata; queryable via admin API
+- **Branch Protection Rules** — per-repo glob patterns; block force-push, require PRs, require N approvals, restrict allowed pushers
+- **Personal Access Tokens (PATs)** — scoped API tokens for CI/CD service accounts; last-used tracking; revocable
+- **Two-Factor Authentication (TOTP)** — RFC 6238 TOTP with QR code setup, 10 single-use backup codes (Argon2id hashed), 2FA challenge on login
+- **SSH Key Management** — store and list user SSH public keys with SHA256 fingerprint validation
+- **SSO / OIDC** — OIDC provider support with JIT user provisioning, PKCE, org auto-enrollment
+- **Teams** — group users within an org; assign repo-level permissions to teams; team membership overrides org baseline
+- **Email Notifications** — SMTP-backed notifications for PR reviews, comments, merges, and org invites; per-user preference controls
+- **System Admin API** — superadmin endpoints for user/org management, system stats, audit log access
 
 ---
 
@@ -79,6 +91,29 @@ All internal services (API, Postgres, Redis) sit on an isolated `backend` Docker
 | `git` | 2.x (client-side, for testing clones/pushes) |
 
 ---
+
+## Configuration
+
+All configuration is via environment variables. Copy `.env.example` to `.env`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `POSTGRES_*` / `DATABASE_URL` | — | PostgreSQL connection |
+| `REDIS_URL` / `REDIS_PASSWORD` | — | Redis connection |
+| `JWT_PRIVATE_KEY_B64` / `JWT_PUBLIC_KEY_B64` | — | RS256 key pair — generate with `scripts/gen-keys.sh` |
+| `TOTP_ENCRYPTION_KEY` | — | 64-char hex (32 bytes) — AES-256-GCM key for TOTP secrets |
+| `SECRET_ENCRYPTION_KEY` | — | 64-char hex (32 bytes) — AES-256-GCM key for SSO client secrets |
+| `SSO_CALLBACK_BASE_URL` | `http://localhost` | Base URL for OAuth2 callback redirect |
+| `SMTP_HOST` | — | Leave blank to disable email; set to enable notifications |
+| `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | — | SMTP credentials |
+| `CORS_ORIGINS` | `http://localhost` | Comma-separated allowed origins |
+| `GIT_REPOS_ROOT` | `/data/repos` | Bare repo storage root |
+
+Generate encryption keys:
+```bash
+openssl rand -hex 32   # TOTP_ENCRYPTION_KEY
+openssl rand -hex 32   # SECRET_ENCRYPTION_KEY
+```
 
 ## Quick Start
 
@@ -253,6 +288,114 @@ Authorization: Bearer <accessToken>
 | `GET` | `/orgs/:orgId/repos/:repoId/commits?branch=main&limit=30&offset=0` | Repo read | Paginated commit log |
 | `POST` | `/orgs/:orgId/repos/:repoId/collaborators` | Repo admin | Add collaborator |
 | `DELETE` | `/orgs/:orgId/repos/:repoId/collaborators/:userId` | Repo admin | Remove collaborator |
+
+### Two-Factor Authentication
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/auth/2fa/setup` | Required | Generate TOTP secret + QR code |
+| `POST` | `/auth/2fa/confirm` | Required | Activate 2FA with first TOTP code — returns backup codes |
+| `POST` | `/auth/2fa/verify` | 2fa_pending token | Exchange pending session + TOTP code for full JWT pair |
+| `POST` | `/auth/2fa/disable` | Required | Disable 2FA (requires password + TOTP code) |
+
+**Login flow with 2FA enabled:**
+```
+POST /auth/login → { requiresTwoFactor: true, sessionToken }
+POST /auth/2fa/verify  (Authorization: Bearer <sessionToken>)
+     → { accessToken, refreshToken }
+```
+
+### SSO / OIDC
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/auth/sso/authorize/:slug` | Redirect to IdP authorization page |
+| `GET` | `/auth/sso/callback/:slug` | OAuth2 callback — issues JWT pair (JIT provisioning) |
+| `GET` | `/auth/sso/providers` | List SSO providers (superadmin) |
+| `POST` | `/auth/sso/providers` | Create SSO provider (superadmin) |
+| `PATCH` | `/auth/sso/providers/:id` | Update SSO provider (superadmin) |
+| `DELETE` | `/auth/sso/providers/:id` | Delete SSO provider (superadmin) |
+
+### Personal Access Tokens
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/users/me/tokens` | Required | List active PATs |
+| `POST` | `/users/me/tokens` | Required | Create PAT — returns raw token **once** |
+| `DELETE` | `/users/me/tokens/:tokenId` | Required | Revoke PAT |
+
+**Create a PAT:**
+```json
+{ "name": "CI deploy bot", "scopes": ["repo:read", "repo:write"], "expiresAt": "2027-01-01T00:00:00Z" }
+```
+Use the returned `token` value as a `Bearer` credential on any API or git HTTP request.
+
+### SSH Keys
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/users/me/ssh-keys` | List your SSH keys |
+| `POST` | `/users/me/ssh-keys` | Add SSH public key |
+| `DELETE` | `/users/me/ssh-keys/:keyId` | Remove SSH key |
+
+### Teams
+
+| Method | Path | Required Role | Description |
+|---|---|---|---|
+| `GET` | `/orgs/:orgId/teams` | Org guest+ | List teams |
+| `POST` | `/orgs/:orgId/teams` | Org admin+ | Create team |
+| `GET` | `/orgs/:orgId/teams/:teamId` | Org guest+ | Get team |
+| `PATCH` | `/orgs/:orgId/teams/:teamId` | Org admin+ | Update team |
+| `DELETE` | `/orgs/:orgId/teams/:teamId` | Org admin+ | Delete team |
+| `GET` | `/orgs/:orgId/teams/:teamId/members` | Org guest+ | List team members |
+| `POST` | `/orgs/:orgId/teams/:teamId/members` | Org admin+ | Add member |
+| `DELETE` | `/orgs/:orgId/teams/:teamId/members/:userId` | Org admin+ | Remove member |
+| `GET` | `/orgs/:orgId/teams/:teamId/repos` | Org guest+ | List team repos |
+| `POST` | `/orgs/:orgId/teams/:teamId/repos` | Org admin+ | Grant repo access to team |
+| `DELETE` | `/orgs/:orgId/teams/:teamId/repos/:repoId` | Org admin+ | Revoke repo access |
+
+### Branch Protection
+
+| Method | Path | Required Role | Description |
+|---|---|---|---|
+| `GET` | `/repos/:repoId/branch-protection` | Repo read | List rules |
+| `POST` | `/repos/:repoId/branch-protection` | Repo admin | Create rule |
+| `PATCH` | `/repos/:repoId/branch-protection/:ruleId` | Repo admin | Update rule |
+| `DELETE` | `/repos/:repoId/branch-protection/:ruleId` | Repo admin | Delete rule |
+
+**Create a rule:**
+```json
+{
+  "pattern": "main",
+  "requirePullRequest": true,
+  "requiredApprovals": 2,
+  "blockForcePush": true,
+  "dismissStaleReviews": true
+}
+```
+Patterns support exact match and glob (e.g. `release/*`). More specific patterns take precedence.
+
+### Notification Preferences
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/users/me/notifications` | Get preferences |
+| `PATCH` | `/users/me/notifications` | Update preferences |
+
+### System Admin
+
+All endpoints require `isSuperadmin = true`.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/admin/users?q=alice&limit=50` | Search users |
+| `GET` | `/admin/users/:userId` | Get user (without password hash) |
+| `PATCH` | `/admin/users/:userId` | Set `isActive` / `isSuperadmin` |
+| `DELETE` | `/admin/users/:userId` | Hard-delete user |
+| `GET` | `/admin/orgs` | List all orgs |
+| `DELETE` | `/admin/orgs/:orgId` | Force-delete org |
+| `GET` | `/admin/stats` | `{ users, organizations, repositories, pullRequests, storageBytes }` |
+| `GET` | `/admin/audit-log?actor=alice&action=pr.merged&since=2026-01-01&limit=100` | Query audit log |
 
 ### Git Smart-HTTP
 
