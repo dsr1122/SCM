@@ -76,7 +76,17 @@ export default async function userRoutes(app: FastifyInstance) {
 
     if (parsed.data.email) updates.email = parsed.data.email;
     if (parsed.data.password) {
-      const { hashPassword } = await import('../services/auth.service.js');
+      // Require current password before allowing a password change — prevents account
+      // takeover with a stolen (not-yet-expired) access token.
+      const { currentPassword } = (req.body ?? {}) as { currentPassword?: string };
+      if (!currentPassword) {
+        return reply.status(400).send({ error: 'currentPassword is required to change password' });
+      }
+      const [row] = await db.select({ passwordHash: users.passwordHash }).from(users).where(eq(users.id, req.user!.id)).limit(1);
+      const { verifyPassword, hashPassword } = await import('../services/auth.service.js');
+      if (!row || !(await verifyPassword(row.passwordHash, currentPassword))) {
+        return reply.status(401).send({ error: 'Current password is incorrect' });
+      }
       updates.passwordHash = await hashPassword(parsed.data.password);
       logAuditEvent({ actorId: req.user!.id, actorUsername: req.user!.username, action: 'user.password_changed', ipAddress: req.ip });
     }

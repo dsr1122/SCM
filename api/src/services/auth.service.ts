@@ -99,7 +99,10 @@ export async function revokeAccessToken(token: string): Promise<void> {
     const { payload } = await (await import('jose')).jwtVerify(token, key);
     const ttl = (payload.exp ?? 0) - Math.floor(Date.now() / 1000);
     if (ttl > 0) {
-      await redis.setex(`blocklist:${token}`, ttl, '1');
+      // Use SHA256 of the token as the Redis key — avoids storing the full JWT
+      // (~500 bytes) and prevents unbounded key growth under high token churn.
+      const tokenHash = createHash('sha256').update(token).digest('hex');
+      await redis.setex(`blocklist:${tokenHash}`, ttl, '1');
     }
   } catch {
     // Already expired — no need to blocklist

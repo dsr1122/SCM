@@ -26,7 +26,8 @@ async function resolveUserById(id: string): Promise<AuthenticatedUser | null> {
 }
 
 async function tryJwtAuth(token: string): Promise<AuthenticatedUser | null> {
-  const revoked = await redis.get(`blocklist:${token}`);
+  const tokenHash = createHash('sha256').update(token).digest('hex');
+  const revoked = await redis.get(`blocklist:${tokenHash}`);
   if (revoked) return null;
 
   try {

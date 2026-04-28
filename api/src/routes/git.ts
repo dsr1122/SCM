@@ -93,10 +93,13 @@ export default async function gitRoutes(app: FastifyInstance) {
     logAuditEvent({ actorId: req.user.id, actorUsername: req.user.username, action: 'repo.pushed', resourceType: 'repository', resourceId: repo.id, repoId: repo.id, ipAddress: req.ip });
 
     setImmediate(() => {
+      // The specific pushed refs are enforced by the pre-receive hook. The HTTP
+      // receive-pack stream is opaque here, so we emit a generic push event
+      // without a specific ref. Consumers that need per-ref data should use the
+      // pre-receive hook or a post-receive hook to emit richer events.
       dispatchWebhookEvent(repo.id, 'push', {
         repository: { id: repo.id, slug: repo.slug },
         pusher: { id: req.user!.id, username: req.user!.username },
-        ref: 'refs/heads/' + repo.defaultBranch,
       }).catch((err) => req.log.error(err, '[webhook] push dispatch failed'));
     });
   });

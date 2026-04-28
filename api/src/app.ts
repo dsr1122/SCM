@@ -65,7 +65,8 @@ app.get('/health', async (_req, reply) => {
     await redis.ping();
     reply.send({ status: 'ok' });
   } catch (err) {
-    reply.status(503).send({ status: 'degraded', error: String(err) });
+    app.log.error(err, '[health] dependency check failed');
+    reply.status(503).send({ status: 'degraded' });
   }
 });
 

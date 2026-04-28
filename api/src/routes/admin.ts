@@ -17,14 +17,17 @@ const updateUserBody = z.object({
   isSuperadmin: z.boolean().optional(),
 }).strict();
 
+const SHA_RE = /^[0-9a-f]{40}$/i;
+const shaSchema = z.string().regex(SHA_RE);
+
 const checkPushBody = z.object({
   repoId: z.string().uuid(),
   userId: z.string().uuid(),
   updates: z.array(z.object({
-    oldSha: z.string(),
-    newSha: z.string(),
-    ref:    z.string(),
-  })),
+    oldSha: shaSchema,
+    newSha: shaSchema,
+    ref:    z.string().min(1).max(512).regex(/^refs\//),
+  })).min(1).max(50),
 }).strict();
 
 let cachedStorageBytes = 0;
@@ -179,8 +182,16 @@ export default async function adminRoutes(app: FastifyInstance) {
     if (query['action'])   conditions.push(eq(auditLog.action, query['action']!));
     if (query['orgId'])    conditions.push(eq(auditLog.orgId, query['orgId']!));
     if (query['repoId'])   conditions.push(eq(auditLog.repoId, query['repoId']!));
-    if (query['since'])    conditions.push(gte(auditLog.createdAt, new Date(query['since']!)));
-    if (query['until'])    conditions.push(lte(auditLog.createdAt, new Date(query['until']!)));
+    if (query['since']) {
+      const d = new Date(query['since']!);
+      if (isNaN(d.getTime())) return reply.status(400).send({ error: 'Invalid since date' });
+      conditions.push(gte(auditLog.createdAt, d));
+    }
+    if (query['until']) {
+      const d = new Date(query['until']!);
+      if (isNaN(d.getTime())) return reply.status(400).send({ error: 'Invalid until date' });
+      conditions.push(lte(auditLog.createdAt, d));
+    }
 
     const rows = await db.select()
       .from(auditLog)

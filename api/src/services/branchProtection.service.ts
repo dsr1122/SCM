@@ -77,7 +77,8 @@ export async function checkMergeAllowed(prId: string): Promise<MergeCheckResult>
       .from(prReviews)
       .where(and(eq(prReviews.prId, prId), eq(prReviews.state, 'approved')));
 
-    let approvals = reviews;
+    // Authors cannot approve their own PRs — exclude the PR author from the approver set
+    let approvals = reviews.filter((r) => r.reviewerId !== pr.authorId);
 
     // If dismissStaleReviews is on, only count approvals that came after the last commit push.
     // We approximate "last push" as the most recent pr_comment with a commitSha, since

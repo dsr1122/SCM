@@ -56,12 +56,14 @@ export async function getCommits(
   offset = 0,
 ): Promise<Array<{ sha: string; message: string; author: string; date: string }>> {
   const format = '%H%x1f%s%x1f%an%x1f%aI';
+  // Prefix with -- to prevent branch names beginning with '-' from being
+  // interpreted as flags by git.
   const { stdout } = await execFileAsync('git', [
     '-C', diskPath, 'log',
     `--format=${format}`,
     `--skip=${offset}`,
     `-n`, String(limit),
-    branch,
+    '--', branch,
   ]);
   return stdout
     .split('\n')

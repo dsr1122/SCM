@@ -116,7 +116,12 @@ export default async function repoRoutes(app: FastifyInstance) {
   app.get('/:repoId/commits', { preHandler: [requireAuth, requireRepoAccess('read')] }, async (req, reply) => {
     const { repoId } = req.params as { repoId: string };
     const query = req.query as Record<string, string>;
-    const branch = query['branch'] ?? 'main';
+    const rawBranch = query['branch'] ?? 'main';
+    // Reject branch names that look like flags or contain path separators
+    if (!/^[a-zA-Z0-9_./-]{1,255}$/.test(rawBranch) || rawBranch.startsWith('-')) {
+      return reply.status(400).send({ error: 'Invalid branch name' });
+    }
+    const branch = rawBranch;
     const limit  = Math.min(parseInt(query['limit']  ?? '30', 10), 100);
     const offset = parseInt(query['offset'] ?? '0', 10);
 

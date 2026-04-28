@@ -1,4 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
+import { lookup } from 'dns/promises';
+import ipaddr from 'ipaddr.js';
 import { config } from '../config.js';
 
 export function encryptClientSecret(plaintext: string): string {
@@ -33,4 +35,17 @@ export function generatePkce(): { codeVerifier: string; codeChallenge: string } 
 
 export function generateState(): string {
   return randomBytes(16).toString('hex');
+}
+
+export async function isSafeExternalUrl(urlStr: string): Promise<boolean> {
+  try {
+    const url = new URL(urlStr);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return false;
+    const { address } = await lookup(url.hostname);
+    const range = ipaddr.parse(address).range();
+    const blocked = ['private', 'loopback', 'linkLocal', 'multicast', 'unspecified'];
+    return !blocked.includes(range);
+  } catch {
+    return false;
+  }
 }

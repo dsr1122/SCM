@@ -13,6 +13,13 @@ const createTeamBody = z.object({
   description: z.string().max(500).optional(),
 }).strict();
 
+// Resolves a team and verifies it belongs to the expected org. Returns null if not found or wrong org.
+async function resolveTeam(teamId: string, orgId: string) {
+  const [team] = await db.select().from(teams)
+    .where(and(eq(teams.id, teamId), eq(teams.orgId, orgId))).limit(1);
+  return team ?? null;
+}
+
 export default async function teamRoutes(app: FastifyInstance) {
   // List teams
   app.get('/', { preHandler: [requireAuth, requireOrgRole('guest')] }, async (req, reply) => {
@@ -35,8 +42,7 @@ export default async function teamRoutes(app: FastifyInstance) {
   // Get team
   app.get('/:teamId', { preHandler: [requireAuth, requireOrgRole('guest')] }, async (req, reply) => {
     const { orgId, teamId } = req.params as { orgId: string; teamId: string };
-    const [team] = await db.select().from(teams)
-      .where(and(eq(teams.id, teamId), eq(teams.orgId, orgId))).limit(1);
+    const team = await resolveTeam(teamId, orgId);
     if (!team) return reply.status(404).send({ error: 'Team not found' });
     return reply.send(team);
   });
@@ -44,27 +50,34 @@ export default async function teamRoutes(app: FastifyInstance) {
   // Update team (admin+)
   app.patch('/:teamId', { preHandler: [requireAuth, requireOrgRole('admin')] }, async (req, reply) => {
     const { orgId, teamId } = req.params as { orgId: string; teamId: string };
+    const team = await resolveTeam(teamId, orgId);
+    if (!team) return reply.status(404).send({ error: 'Team not found' });
+
     const parsed = createTeamBody.partial().safeParse(req.body);
     if (!parsed.success) return reply.status(400).send({ error: 'Validation failed' });
     const [updated] = await db.update(teams)
       .set({ ...parsed.data, updatedAt: new Date() })
-      .where(and(eq(teams.id, teamId), eq(teams.orgId, orgId)))
+      .where(eq(teams.id, teamId))
       .returning();
-    if (!updated) return reply.status(404).send({ error: 'Team not found' });
     return reply.send(updated);
   });
 
   // Delete team (admin+)
   app.delete('/:teamId', { preHandler: [requireAuth, requireOrgRole('admin')] }, async (req, reply) => {
     const { orgId, teamId } = req.params as { orgId: string; teamId: string };
-    await db.delete(teams).where(and(eq(teams.id, teamId), eq(teams.orgId, orgId)));
+    const team = await resolveTeam(teamId, orgId);
+    if (!team) return reply.status(404).send({ error: 'Team not found' });
+    await db.delete(teams).where(eq(teams.id, teamId));
     return reply.status(204).send();
   });
 
   // ── Team Members ─────────────────────────────────────────────────────────
 
   app.get('/:teamId/members', { preHandler: [requireAuth, requireOrgRole('guest')] }, async (req, reply) => {
-    const { teamId } = req.params as { teamId: string };
+    const { orgId, teamId } = req.params as { orgId: string; teamId: string };
+    const team = await resolveTeam(teamId, orgId);
+    if (!team) return reply.status(404).send({ error: 'Team not found' });
+
     const members = await db
       .select({ userId: teamMembers.userId, role: teamMembers.role, username: users.username, email: users.email })
       .from(teamMembers)
@@ -74,7 +87,10 @@ export default async function teamRoutes(app: FastifyInstance) {
   });
 
   app.post('/:teamId/members', { preHandler: [requireAuth, requireOrgRole('admin')] }, async (req, reply) => {
-    const { teamId } = req.params as { teamId: string };
+    const { orgId, teamId } = req.params as { orgId: string; teamId: string };
+    const team = await resolveTeam(teamId, orgId);
+    if (!team) return reply.status(404).send({ error: 'Team not found' });
+
     const { username, role = 'member' } = (req.body ?? {}) as { username?: string; role?: string };
     if (!username || !['maintainer', 'member'].includes(role)) {
       return reply.status(400).send({ error: 'username and role (maintainer|member) required' });
@@ -90,7 +106,9 @@ export default async function teamRoutes(app: FastifyInstance) {
   });
 
   app.delete('/:teamId/members/:userId', { preHandler: [requireAuth, requireOrgRole('admin')] }, async (req, reply) => {
-    const { teamId, userId } = req.params as { teamId: string; userId: string };
+    const { orgId, teamId, userId } = req.params as { orgId: string; teamId: string; userId: string };
+    const team = await resolveTeam(teamId, orgId);
+    if (!team) return reply.status(404).send({ error: 'Team not found' });
     await db.delete(teamMembers).where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, userId)));
     return reply.status(204).send();
   });
@@ -98,7 +116,10 @@ export default async function teamRoutes(app: FastifyInstance) {
   // ── Team Repo Permissions ─────────────────────────────────────────────────
 
   app.get('/:teamId/repos', { preHandler: [requireAuth, requireOrgRole('guest')] }, async (req, reply) => {
-    const { teamId } = req.params as { teamId: string };
+    const { orgId, teamId } = req.params as { orgId: string; teamId: string };
+    const team = await resolveTeam(teamId, orgId);
+    if (!team) return reply.status(404).send({ error: 'Team not found' });
+
     const perms = await db
       .select({
         repoId: teamRepoPermissions.repoId, role: teamRepoPermissions.role,
@@ -111,12 +132,21 @@ export default async function teamRoutes(app: FastifyInstance) {
   });
 
   app.post('/:teamId/repos', { preHandler: [requireAuth, requireOrgRole('admin')] }, async (req, reply) => {
-    const { teamId } = req.params as { teamId: string };
+    const { orgId, teamId } = req.params as { orgId: string; teamId: string };
+    const team = await resolveTeam(teamId, orgId);
+    if (!team) return reply.status(404).send({ error: 'Team not found' });
+
     const { repoId, role } = (req.body ?? {}) as { repoId?: string; role?: string };
     const validRoles: RepoRole[] = ['admin', 'write', 'read'];
     if (!repoId || !role || !validRoles.includes(role as RepoRole)) {
       return reply.status(400).send({ error: 'repoId and role (admin|write|read) required' });
     }
+
+    // Ensure the repo belongs to this org — prevents cross-org privilege escalation
+    const [repo] = await db.select({ orgId: repositories.orgId }).from(repositories).where(eq(repositories.id, repoId)).limit(1);
+    if (!repo) return reply.status(404).send({ error: 'Repository not found' });
+    if (repo.orgId !== orgId) return reply.status(403).send({ error: 'Repository does not belong to this organization' });
+
     await db.insert(teamRepoPermissions)
       .values({ teamId, repoId, role })
       .onConflictDoUpdate({ target: [teamRepoPermissions.teamId, teamRepoPermissions.repoId], set: { role } });
@@ -124,7 +154,9 @@ export default async function teamRoutes(app: FastifyInstance) {
   });
 
   app.delete('/:teamId/repos/:repoId', { preHandler: [requireAuth, requireOrgRole('admin')] }, async (req, reply) => {
-    const { teamId, repoId } = req.params as { teamId: string; repoId: string };
+    const { orgId, teamId, repoId } = req.params as { orgId: string; teamId: string; repoId: string };
+    const team = await resolveTeam(teamId, orgId);
+    if (!team) return reply.status(404).send({ error: 'Team not found' });
     await db.delete(teamRepoPermissions)
       .where(and(eq(teamRepoPermissions.teamId, teamId), eq(teamRepoPermissions.repoId, repoId)));
     return reply.status(204).send();

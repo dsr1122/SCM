@@ -6,7 +6,7 @@ import { db } from '../db/client.js';
 import { ssoProviders, userIdentities, users, orgMembers } from '../db/schema.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireSuperadmin } from '../middleware/superadmin.js';
-import { encryptClientSecret, decryptClientSecret, generateState } from '../services/sso.service.js';
+import { encryptClientSecret, decryptClientSecret, generateState, isSafeExternalUrl } from '../services/sso.service.js';
 import { issueAccessToken, issueRefreshToken } from '../services/auth.service.js';
 import { logAuditEvent } from '../services/audit.service.js';
 import { config } from '../config.js';
@@ -46,6 +46,9 @@ export default async function ssoRoutes(app: FastifyInstance) {
     if (provider.providerType === 'oidc' && provider.discoveryUrl) {
       // Discover authorization_endpoint from OIDC discovery document
       try {
+        if (!(await isSafeExternalUrl(provider.discoveryUrl))) {
+          return reply.status(400).send({ error: 'SSO provider discovery URL resolves to a private/internal address' });
+        }
         const discovery = await fetch(`${provider.discoveryUrl}/.well-known/openid-configuration`);
         const meta = await discovery.json() as Record<string, string>;
         const base = meta['authorization_endpoint'] ?? '';
@@ -90,6 +93,9 @@ export default async function ssoRoutes(app: FastifyInstance) {
     const { providerId } = JSON.parse(stateData) as { providerId: string };
     const [provider] = await db.select().from(ssoProviders).where(eq(ssoProviders.id, providerId)).limit(1);
     if (!provider) return reply.status(404).send({ error: 'Provider not found' });
+    // Verify the slug in the URL matches the provider the state was issued for.
+    // Prevents an attacker from swapping a valid state token across providers.
+    if (provider.slug !== slug) return reply.status(400).send({ error: 'State/provider mismatch' });
 
     const clientSecret = decryptClientSecret(provider.clientSecretEncrypted);
     const callbackUrl = `${config.ssoCallbackBaseUrl}/auth/sso/callback/${slug}`;
@@ -101,6 +107,9 @@ export default async function ssoRoutes(app: FastifyInstance) {
 
     if (provider.providerType === 'oidc' && provider.discoveryUrl) {
       try {
+        if (!(await isSafeExternalUrl(provider.discoveryUrl))) {
+          return reply.status(400).send({ error: 'SSO provider discovery URL resolves to a private/internal address' });
+        }
         const disc = await fetch(`${provider.discoveryUrl}/.well-known/openid-configuration`);
         const meta = await disc.json() as Record<string, string>;
         tokenEndpoint = meta['token_endpoint'] ?? '';
