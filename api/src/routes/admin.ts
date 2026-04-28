@@ -50,7 +50,13 @@ export default async function adminRoutes(app: FastifyInstance) {
     for (const update of updates) {
       if (!update.ref.startsWith('refs/heads/')) continue;
       const branch = update.ref.replace('refs/heads/', '');
-      const isForcePush = update.oldSha !== '0'.repeat(40) && update.newSha !== '0'.repeat(40); // Simplistic check
+      // A force-push is a non-create, non-delete update where the new SHA is not a descendant
+      // of the old SHA. We can't do the ancestry check here without a disk path, so we rely on
+      // the branch protection service to enforce blockForcePush if enabled.
+      // A delete is oldSha != zeros, newSha == zeros; a create is the reverse.
+      const isDelete = update.newSha === '0'.repeat(40);
+      const isCreate = update.oldSha === '0'.repeat(40);
+      const isForcePush = !isCreate && !isDelete;
 
       const result = await checkPushAllowed(repoId, branch, userId, isForcePush);
       if (!result.allowed) {
@@ -63,8 +69,7 @@ export default async function adminRoutes(app: FastifyInstance) {
 
   // ── Users ─────────────────────────────────────────────────────────────────
   app.get('/users', { preHandler: pre }, async (req, reply) => {
-...
-
+    const query = req.query as Record<string, string>;
     const search = query['q'];
     const limit  = Math.min(parseInt(query['limit']  ?? '50', 10), 200);
     const offset = parseInt(query['offset'] ?? '0', 10);

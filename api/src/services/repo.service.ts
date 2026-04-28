@@ -72,6 +72,11 @@ export async function getCommits(
     });
 }
 
+export async function revParse(diskPath: string, ref: string): Promise<string> {
+  const { stdout } = await execFileAsync('git', ['-C', diskPath, 'rev-parse', ref]);
+  return stdout.trim();
+}
+
 // Returns the merge-base commit SHA of two branches, or null if unrelated.
 export async function mergeBase(diskPath: string, a: string, b: string): Promise<string | null> {
   try {

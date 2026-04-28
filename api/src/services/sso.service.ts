@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 import { config } from '../config.js';
 
 export function encryptClientSecret(plaintext: string): string {
@@ -27,7 +27,6 @@ export function decryptClientSecret(ciphertext: string): string {
 // Generate PKCE code verifier + challenge
 export function generatePkce(): { codeVerifier: string; codeChallenge: string } {
   const codeVerifier = randomBytes(32).toString('base64url');
-  const { createHash } = require('crypto');
   const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url');
   return { codeVerifier, codeChallenge };
 }

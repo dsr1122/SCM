@@ -1,42 +1,60 @@
 #!/usr/bin/env node
-import { lookup } from 'dns/promises';
-import { readFileSync } from 'fs';
-
-// This script is intended to be used as a git pre-receive hook.
-// It reads commands from stdin and calls the SCM API to validate the push.
-
 const REPO_ID = process.env['SCM_REPO_ID'];
 const USER_ID = process.env['SCM_USER_ID'];
 const API_URL = process.env['SCM_INTERNAL_API_URL'] || 'http://localhost:3000';
 
 if (!REPO_ID || !USER_ID) {
-  process.exit(0); // If not configured, allow push (fail-open for safety, or fail-closed?)
+  // Missing env means the hook was invoked outside SCM — deny.
+  process.stderr.write('\n[SCM] Push rejected: hook environment not configured\n\n');
+  process.exit(1);
+}
+
+const SHA_RE = /^[0-9a-f]{40}$/i;
+
+function parseUpdates(input) {
+  return input
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const parts = line.split(' ');
+      if (parts.length !== 3) return null;
+      const [oldSha, newSha, ref] = parts;
+      // Validate SHA format to prevent injection into downstream JSON
+      if (!SHA_RE.test(oldSha) || !SHA_RE.test(newSha)) return null;
+      if (!ref || !ref.startsWith('refs/')) return null;
+      return { oldSha, newSha, ref };
+    })
+    .filter(Boolean);
 }
 
 async function main() {
-  const input = readFileSync(0, 'utf8');
-  const lines = input.split('\n').filter(Boolean);
-  const updates = lines.map(line => {
-    const [oldSha, newSha, ref] = line.split(' ');
-    return { oldSha, newSha, ref };
-  });
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  const input = Buffer.concat(chunks).toString('utf8');
+  const updates = parseUpdates(input);
 
+  if (updates.length === 0) process.exit(0);
+
+  let res;
   try {
-    const res = await fetch(`${API_URL}/admin/internal/check-push`, {
+    res = await fetch(`${API_URL}/admin/internal/check-push`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ repoId: REPO_ID, userId: USER_ID, updates }),
     });
-
-    if (!res.ok) {
-      const data = await res.json();
-      console.error(`\n[SCM] Push rejected: ${data.error || 'Unknown error'}\n`);
-      process.exit(1);
-    }
   } catch (err) {
-    console.error(`\n[SCM] Internal error validating push: ${err}\n`);
+    process.stderr.write(`\n[SCM] Internal error validating push: ${err}\n\n`);
     process.exit(1);
   }
+
+  if (!res.ok) {
+    let msg = 'Unknown error';
+    try { msg = (await res.json()).error ?? msg; } catch { /* ignore */ }
+    process.stderr.write(`\n[SCM] Push rejected: ${msg}\n\n`);
+    process.exit(1);
+  }
+
+  process.exit(0);
 }
 
 main();

@@ -5,7 +5,7 @@ import { db } from '../db/client.js';
 import { webhooks, webhookDeliveries } from '../db/schema.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireRepoAccess } from '../middleware/rbac.js';
-import { hashSecret } from '../services/webhook.service.js';
+import { encryptWebhookSecret } from '../services/webhook.service.js';
 import type { WebhookEvent } from '../types/index.js';
 
 const VALID_EVENTS: WebhookEvent[] = ['push', 'pull_request'];
@@ -38,7 +38,7 @@ export default async function webhookRoutes(app: FastifyInstance) {
     const [hook] = await db.insert(webhooks).values({
       repoId,
       url:        parsed.data.url,
-      secretHash: hashSecret(parsed.data.secret),
+      secretHash: encryptWebhookSecret(parsed.data.secret),
       events:     parsed.data.events,
     }).returning({ id: webhooks.id, url: webhooks.url, events: webhooks.events, createdAt: webhooks.createdAt });
 
@@ -69,7 +69,7 @@ export default async function webhookRoutes(app: FastifyInstance) {
 
     const updates: Record<string, unknown> = {};
     if (body.url)      updates['url']        = body.url;
-    if (body.secret)   updates['secretHash'] = hashSecret(body.secret);
+    if (body.secret)   updates['secretHash'] = encryptWebhookSecret(body.secret);
     if (body.events)   updates['events']     = body.events.filter((e) => VALID_EVENTS.includes(e));
     if (body.isActive !== undefined) updates['isActive'] = body.isActive;
 

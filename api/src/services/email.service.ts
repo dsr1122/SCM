@@ -6,6 +6,10 @@ import { eq } from 'drizzle-orm';
 type Transporter = import('nodemailer').Transporter;
 let _transporter: Transporter | null = null;
 
+function esc(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 async function getTransporter(): Promise<Transporter | null> {
   if (!config.smtp.host) return null;
   if (_transporter) return _transporter;
@@ -47,7 +51,7 @@ export function notifyPrReviewSubmitted(prAuthorId: string, reviewerUsername: st
 
     const subject = `[SCM] ${reviewerUsername} reviewed your PR: ${prTitle}`;
     const text = `${reviewerUsername} submitted a review on your pull request "${prTitle}".\n\nView it at: ${prUrl}`;
-    const html = `<p><strong>${reviewerUsername}</strong> submitted a review on your pull request <strong>${prTitle}</strong>.</p><p><a href="${prUrl}">View pull request</a></p>`;
+    const html = `<p><strong>${esc(reviewerUsername)}</strong> submitted a review on your pull request <strong>${esc(prTitle)}</strong>.</p><p><a href="${esc(prUrl)}">View pull request</a></p>`;
     await sendMail(prefs.email, subject, text, html).catch((e) => console.error('[email]', e));
   });
 }
@@ -59,7 +63,7 @@ export function notifyPrCommentAdded(prAuthorId: string, commenterUsername: stri
 
     const subject = `[SCM] ${commenterUsername} commented on your PR: ${prTitle}`;
     const text = `${commenterUsername} commented on your pull request "${prTitle}".\n\nView it at: ${prUrl}`;
-    const html = `<p><strong>${commenterUsername}</strong> commented on your pull request <strong>${prTitle}</strong>.</p><p><a href="${prUrl}">View pull request</a></p>`;
+    const html = `<p><strong>${esc(commenterUsername)}</strong> commented on your pull request <strong>${esc(prTitle)}</strong>.</p><p><a href="${esc(prUrl)}">View pull request</a></p>`;
     await sendMail(prefs.email, subject, text, html).catch((e) => console.error('[email]', e));
   });
 }
@@ -71,7 +75,7 @@ export function notifyPrMergedOrClosed(prAuthorId: string, actorUsername: string
 
     const subject = `[SCM] Your PR was ${action}: ${prTitle}`;
     const text = `${actorUsername} ${action} your pull request "${prTitle}".\n\nView it at: ${prUrl}`;
-    const html = `<p><strong>${actorUsername}</strong> ${action} your pull request <strong>${prTitle}</strong>.</p><p><a href="${prUrl}">View pull request</a></p>`;
+    const html = `<p><strong>${esc(actorUsername)}</strong> ${action} your pull request <strong>${esc(prTitle)}</strong>.</p><p><a href="${esc(prUrl)}">View pull request</a></p>`;
     await sendMail(prefs.email, subject, text, html).catch((e) => console.error('[email]', e));
   });
 }
@@ -83,7 +87,7 @@ export function notifyOrgInvite(inviteeId: string, orgName: string, inviterUsern
 
     const subject = `[SCM] You've been invited to ${orgName}`;
     const text = `${inviterUsername} has added you to the organization "${orgName}".`;
-    const html = `<p><strong>${inviterUsername}</strong> has added you to the organization <strong>${orgName}</strong>.</p>`;
+    const html = `<p><strong>${esc(inviterUsername)}</strong> has added you to the organization <strong>${esc(orgName)}</strong>.</p>`;
     await sendMail(prefs.email, subject, text, html).catch((e) => console.error('[email]', e));
   });
 }

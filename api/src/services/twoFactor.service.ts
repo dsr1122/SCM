@@ -4,6 +4,7 @@ import { db } from '../db/client.js';
 import { userTotp } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
 import { config } from '../config.js';
+import { redis } from '../middleware/rateLimiter.js';
 
 // Lazy imports to avoid loading at startup when 2FA not configured
 async function getOTPAuth() {
@@ -78,7 +79,13 @@ export async function verifyTotpCode(userId: string, code: string): Promise<bool
   const plainSecret = decryptSecret(record.secret);
   const totp = new TOTP({ issuer: 'SCM', algorithm: 'SHA1', digits: 6, period: 30, secret: Secret.fromBase32(plainSecret) });
   const delta = totp.validate({ token: code, window: 1 });
-  if (delta !== null) return true;
+  if (delta !== null) {
+    // Prevent replay: mark this code used for its time step (90s covers window=1 on both sides)
+    const replayKey = `totp:used:${userId}:${code}`;
+    const wasUsed = await redis.set(replayKey, '1', 'EX', 90, 'NX');
+    if (wasUsed === null) return false; // already used
+    return true;
+  }
 
   // Try backup codes
   const backupCodes = record.backupCodes as string[];

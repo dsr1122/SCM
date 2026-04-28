@@ -1,7 +1,7 @@
 import { minimatch } from 'minimatch';
 import { db } from '../db/client.js';
-import { branchProtectionRules, prReviews, pullRequests } from '../db/schema.js';
-import { eq, and } from 'drizzle-orm';
+import { branchProtectionRules, prReviews, pullRequests, prComments } from '../db/schema.js';
+import { eq, and, gt } from 'drizzle-orm';
 
 export type BranchProtectionRule = typeof branchProtectionRules.$inferSelect;
 
@@ -77,8 +77,24 @@ export async function checkMergeAllowed(prId: string): Promise<MergeCheckResult>
       .from(prReviews)
       .where(and(eq(prReviews.prId, prId), eq(prReviews.state, 'approved')));
 
-    // Unique approvers
-    const uniqueApprovers = new Set(reviews.map((r) => r.reviewerId));
+    let approvals = reviews;
+
+    // If dismissStaleReviews is on, only count approvals that came after the last commit push.
+    // We approximate "last push" as the most recent pr_comment with a commitSha, since
+    // we don't track force-push timestamps separately.
+    if (rule.dismissStaleReviews && approvals.length > 0) {
+      const [lastCommitRef] = await db
+        .select({ createdAt: prComments.createdAt })
+        .from(prComments)
+        .where(and(eq(prComments.prId, prId), gt(prComments.commitSha, '')))
+        .orderBy(prComments.createdAt)
+        .limit(1);
+      if (lastCommitRef) {
+        approvals = approvals.filter((r) => r.submittedAt > lastCommitRef.createdAt);
+      }
+    }
+
+    const uniqueApprovers = new Set(approvals.map((r) => r.reviewerId));
 
     if (uniqueApprovers.size < rule.requiredApprovals) {
       return {

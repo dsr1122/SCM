@@ -2,10 +2,9 @@ import type { FastifyRequest, FastifyReply } from 'fastify';
 
 export async function requireSuperadmin(req: FastifyRequest, reply: FastifyReply): Promise<void> {
   if (!req.user) {
-    reply.status(401).send({ error: 'Authentication required' });
-    return;
+    return reply.status(401).send({ error: 'Authentication required' });
   }
   if (!req.user.isSuperadmin) {
-    reply.status(403).send({ error: 'Superadmin access required' });
+    return reply.status(403).send({ error: 'Superadmin access required' });
   }
 }

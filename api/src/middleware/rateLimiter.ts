@@ -47,7 +47,7 @@ export function ipRateLimit(limitPerMinute: number) {
     reply.header('X-RateLimit-Reset', resetAt);
 
     if (!allowed) {
-      reply.status(429).send({ error: 'Rate limit exceeded' });
+      return reply.status(429).send({ error: 'Rate limit exceeded' });
     }
   };
 }
@@ -63,7 +63,7 @@ export function userRateLimit(limitPerMinute: number) {
     reply.header('X-RateLimit-Reset', resetAt);
 
     if (!allowed) {
-      reply.status(429).send({ error: 'Rate limit exceeded' });
+      return reply.status(429).send({ error: 'Rate limit exceeded' });
     }
   };
 }

@@ -1,4 +1,4 @@
-import { createHmac, createHash, timingSafeEqual } from 'crypto';
+import { createHmac, createHash, createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 import { db } from '../db/client.js';
 import { webhooks, webhookDeliveries } from '../db/schema.js';
 import { eq, and } from 'drizzle-orm';
@@ -7,6 +7,30 @@ import type { WebhookEvent } from '../types/index.js';
 import { lookup } from 'dns/promises';
 import ipaddr from 'ipaddr.js';
 
+// Webhooks store the signing secret encrypted at rest (AES-256-GCM).
+// The plaintext is recovered at delivery time and used as the HMAC-SHA256 key,
+// matching the standard GitHub-style receiver verification pattern.
+export function encryptWebhookSecret(secret: string): string {
+  if (!config.secretEncryptionKey) throw new Error('SECRET_ENCRYPTION_KEY not configured — cannot store webhook secret');
+  const key = Buffer.from(config.secretEncryptionKey, 'hex');
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const enc = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return [iv.toString('hex'), enc.toString('hex'), tag.toString('hex')].join(':');
+}
+
+export function decryptWebhookSecret(ciphertext: string): string {
+  if (!config.secretEncryptionKey) throw new Error('SECRET_ENCRYPTION_KEY not configured');
+  const key = Buffer.from(config.secretEncryptionKey, 'hex');
+  const [ivHex, encHex, tagHex] = ciphertext.split(':');
+  if (!ivHex || !encHex || !tagHex) throw new Error('Invalid webhook secret ciphertext');
+  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(ivHex, 'hex'));
+  decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
+  return decipher.update(Buffer.from(encHex, 'hex')) + decipher.final('utf8');
+}
+
+// SHA256 fingerprint — stored alongside the encrypted secret for quick lookup/display.
 export function hashSecret(secret: string): string {
   return createHash('sha256').update(secret).digest('hex');
 }
@@ -39,7 +63,7 @@ async function isSafeUrl(urlStr: string): Promise<boolean> {
 async function deliverOnce(
   webhookId: string,
   url: string,
-  secret: string,
+  encryptedSecret: string,
   event: WebhookEvent,
   payload: Record<string, unknown>,
 ): Promise<{ status: number | null; durationMs: number; error?: string }> {
@@ -50,7 +74,13 @@ async function deliverOnce(
   }
 
   const body = JSON.stringify(payload);
-  const signature = signPayload(secret, body);
+  let plaintextSecret: string;
+  try {
+    plaintextSecret = decryptWebhookSecret(encryptedSecret);
+  } catch {
+    return { status: null, durationMs: Date.now() - start, error: 'Failed to decrypt webhook secret' };
+  }
+  const signature = signPayload(plaintextSecret, body);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.webhookTimeoutMs);

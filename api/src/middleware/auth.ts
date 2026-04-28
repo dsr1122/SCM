@@ -66,26 +66,36 @@ async function tryPatAuth(token: string): Promise<AuthenticatedUser | null> {
 export async function requireAuth(req: FastifyRequest, reply: FastifyReply): Promise<void> {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) {
-    reply.status(401).send({ error: 'Missing or invalid Authorization header' });
-    return;
+    return reply.status(401).send({ error: 'Missing or invalid Authorization header' });
   }
 
   const token = header.slice(7);
   const user = (await tryJwtAuth(token)) ?? (await tryPatAuth(token));
 
   if (!user) {
-    reply.status(401).send({ error: 'Invalid or expired token' });
-    return;
+    return reply.status(401).send({ error: 'Invalid or expired token' });
   }
 
   req.user = user;
 }
 
-export async function optionalAuth(req: FastifyRequest, _reply: FastifyReply): Promise<void> {
-  const header = req.headers.authorization;
-  if (!header?.startsWith('Bearer ')) return;
+// Extracts a token from either Bearer or HTTP Basic auth.
+// Git clients use Basic with any username and the token as password.
+function extractToken(header: string | undefined): string | null {
+  if (!header) return null;
+  if (header.startsWith('Bearer ')) return header.slice(7);
+  if (header.startsWith('Basic ')) {
+    const decoded = Buffer.from(header.slice(6), 'base64').toString('utf-8');
+    const colonIdx = decoded.indexOf(':');
+    if (colonIdx === -1) return null;
+    return decoded.slice(colonIdx + 1); // password field carries the token
+  }
+  return null;
+}
 
-  const token = header.slice(7);
+export async function optionalAuth(req: FastifyRequest, _reply: FastifyReply): Promise<void> {
+  const token = extractToken(req.headers.authorization);
+  if (!token) return;
   const user = (await tryJwtAuth(token)) ?? (await tryPatAuth(token));
   if (user) req.user = user;
 }

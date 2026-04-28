@@ -145,9 +145,10 @@ export default async function ssoRoutes(app: FastifyInstance) {
           return reply.status(401).send({ error: 'Invalid ID token signature' });
         }
       } else {
-        // Fallback for non-OIDC or missing discovery (less secure, but better than nothing)
-        const parts = tokens['id_token'].split('.');
-        rawClaims = JSON.parse(Buffer.from(parts[1] ?? '', 'base64url').toString()) as Record<string, unknown>;
+        // oauth2 providers that return an id_token without a JWKS discovery URL:
+        // we cannot verify the signature, so we reject it. Admins must configure
+        // OIDC with a discoveryUrl to enable id_token-based identity.
+        return reply.status(400).send({ error: 'Cannot verify id_token: provider has no OIDC discovery URL. Configure discoveryUrl or use a userinfo endpoint.' });
       }
       externalId = String(rawClaims['sub'] ?? '');
       email = String(rawClaims['email'] ?? '');
@@ -175,8 +176,10 @@ export default async function ssoRoutes(app: FastifyInstance) {
       const [taken] = await db.select({ id: users.id }).from(users).where(eq(users.username, username)).limit(1);
       if (taken) username = `${username}_${randomBytes(3).toString('hex')}`;
 
+      // SSO users have no password. Store a sentinel that can never match any
+      // Argon2 hash (argon2id hashes start with "$argon2id$").
       const [newUser] = await db.insert(users)
-        .values({ username, email, passwordHash: `sso:${provider.slug}`, isActive: true })
+        .values({ username, email, passwordHash: `!sso:${provider.slug}`, isActive: true })
         .returning({ id: users.id });
       userId = newUser!.id;
 

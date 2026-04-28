@@ -1,15 +1,20 @@
 import { db } from '../db/client.js';
 import { pullRequests, repositories } from '../db/schema.js';
 import { eq, sql } from 'drizzle-orm';
-import { mergeBase, fastForwardMerge, mergeCommit } from './repo.service.js';
+import { mergeBase, fastForwardMerge, mergeCommit, revParse } from './repo.service.js';
 import { checkMergeAllowed } from './branchProtection.service.js';
 
+// Use a DB-level advisory lock per repo to make PR number assignment atomic.
+// Without this, concurrent inserts race on MAX(number)+1 and produce duplicates.
 export async function nextPrNumber(repoId: string): Promise<number> {
-  const [row] = await db
-    .select({ max: sql<number>`COALESCE(MAX(${pullRequests.number}), 0)` })
-    .from(pullRequests)
-    .where(eq(pullRequests.repoId, repoId));
-  return (row?.max ?? 0) + 1;
+  // pg_advisory_xact_lock takes a bigint; hash the UUID into one.
+  const [row] = await db.execute(sql`
+    SELECT pg_advisory_xact_lock(abs(hashtext(${repoId}::text))),
+           COALESCE(MAX(number), 0) + 1 AS next_number
+    FROM pull_requests
+    WHERE repo_id = ${repoId}::uuid
+  `);
+  return (row as unknown as { next_number: number }).next_number;
 }
 
 export type MergeResult = { sha: string; strategy: 'fast-forward' | 'merge-commit' };
@@ -34,11 +39,15 @@ export async function mergePullRequest(
     .limit(1);
   if (!repo) throw new Error('Repository not found');
 
+  // Fast-forward is only possible when the target's tip IS the merge-base
+  // (i.e., target has not diverged from source's history).
+  const targetTip = await revParse(repo.diskPath, pr.targetBranch);
   const base = await mergeBase(repo.diskPath, pr.sourceBranch, pr.targetBranch);
+
   let sha: string;
   let strategy: MergeResult['strategy'];
 
-  if (base) {
+  if (base && base === targetTip) {
     sha = await fastForwardMerge(repo.diskPath, pr.sourceBranch, pr.targetBranch);
     strategy = 'fast-forward';
   } else {
